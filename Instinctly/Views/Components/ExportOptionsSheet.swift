@@ -240,7 +240,7 @@ struct ExportOptionsSheet: View {
     private func share() {
         guard let image = getExportImage() else { return }
 
-        let picker = NSSharingServicePicker(items: [image])
+        let _ = NSSharingServicePicker(items: [image])
         // Note: In a real implementation, you'd need to present this relative to a view
     }
 

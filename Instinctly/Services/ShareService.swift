@@ -2,9 +2,10 @@ import Foundation
 import AppKit
 import CloudKit
 import SwiftUI
+import Combine
 import os.log
 
-private nonisolated(unsafe) let shareLogger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "Instinctly", category: "ShareService")
+private let shareLogger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "Instinctly", category: "ShareService")
 
 /// Service for sharing images and generating shareable links
 @MainActor

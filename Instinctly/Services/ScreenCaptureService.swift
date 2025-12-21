@@ -4,8 +4,7 @@ import CoreGraphics
 import Combine
 import os.log
 
-// Use nonisolated(unsafe) to allow logging from any context
-private nonisolated(unsafe) let captureLogger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "Instinctly", category: "ScreenCapture")
+private let captureLogger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "Instinctly", category: "ScreenCapture")
 
 /// Service for capturing screenshots using ScreenCaptureKit
 class ScreenCaptureService: ObservableObject {

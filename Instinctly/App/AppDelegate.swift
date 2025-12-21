@@ -3,8 +3,7 @@ import SwiftUI
 import Carbon.HIToolbox
 import os.log
 
-// Use nonisolated(unsafe) to allow logging from any context
-private nonisolated(unsafe) let appLogger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "Instinctly", category: "AppDelegate")
+private let appLogger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "Instinctly", category: "AppDelegate")
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var keyboardShortcutManager: KeyboardShortcutManager?

@@ -4,8 +4,7 @@ import CoreGraphics
 import SwiftUI
 import os.log
 
-// Use nonisolated(unsafe) to allow logging from any context
-private nonisolated(unsafe) let imageLogger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "Instinctly", category: "ImageProcessing")
+private let imageLogger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "Instinctly", category: "ImageProcessing")
 
 /// Service for image processing operations
 class ImageProcessingService {

@@ -271,7 +271,7 @@ struct CanvasView: View {
 
     private func selectAnnotation(at point: CGPoint) {
         // Find annotation at point
-        for (index, annotation) in appState.annotations.enumerated().reversed() {
+        for annotation in appState.annotations.reversed() {
             if annotation.frame.contains(point) {
                 // Select this annotation
                 // TODO: Implement selection state

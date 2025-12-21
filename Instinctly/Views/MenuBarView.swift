@@ -207,7 +207,7 @@ struct MenuButton: View {
 
                 Spacer()
 
-                if let shortcut = shortcut {
+                if shortcut != nil {
                     Text("5")
                         .font(.caption)
                         .foregroundColor(.secondary)

@@ -48,7 +48,7 @@ struct MainWindowView: View {
         } detail: {
             // Main content
             VStack(spacing: 0) {
-                if let image = appState.currentImage {
+                if appState.currentImage != nil {
                     // Show editor if image is loaded
                     ImageEditorView(imageId: nil)
                 } else {
