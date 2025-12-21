@@ -57,13 +57,19 @@ struct RecordingConfiguration {
         case region = "Region"
         case window = "Window"
         case fullScreen = "Full Screen"
+        case voiceOnly = "Voice Only"
 
         var icon: String {
             switch self {
             case .region: return "rectangle.dashed"
             case .window: return "macwindow"
             case .fullScreen: return "rectangle.on.rectangle"
+            case .voiceOnly: return "mic.fill"
             }
+        }
+
+        var isVideoMode: Bool {
+            self != .voiceOnly
         }
     }
 
@@ -72,13 +78,25 @@ struct RecordingConfiguration {
         case mp4 = "MP4"
         case webm = "WebM"
         case mov = "MOV"
+        case m4a = "M4A"  // Audio only
 
         var fileExtension: String { rawValue.lowercased() }
 
         var supportsAudio: Bool {
             switch self {
             case .gif: return false
-            case .mp4, .webm, .mov: return true
+            case .mp4, .webm, .mov, .m4a: return true
+            }
+        }
+
+        var isAudioOnly: Bool {
+            self == .m4a
+        }
+
+        var isVideoFormat: Bool {
+            switch self {
+            case .gif, .mp4, .webm, .mov: return true
+            case .m4a: return false
             }
         }
     }
@@ -153,6 +171,9 @@ class ScreenRecordingService: NSObject, ObservableObject {
 
     private var recordingOverlay: RecordingOverlayWindowController?
 
+    // Voice-only recording
+    private var audioRecorder: AVAudioRecorder?
+
     override init() {
         super.init()
         recordLogger.info("🎬 ScreenRecordingService initialized")
@@ -164,6 +185,12 @@ class ScreenRecordingService: NSObject, ObservableObject {
     func startRecording() async throws {
         guard state == .idle else {
             recordLogger.warning("⚠️ Cannot start: already recording")
+            return
+        }
+
+        // Handle voice-only recording separately
+        if configuration.captureMode == .voiceOnly {
+            try await startVoiceOnlyRecording()
             return
         }
 
@@ -200,6 +227,10 @@ class ScreenRecordingService: NSObject, ObservableObject {
                 }
                 // For region, we capture full display and crop later
                 filter = SCContentFilter(display: display, excludingWindows: [])
+
+            case .voiceOnly:
+                // Handled above
+                return
             }
 
             // Configure stream
@@ -296,6 +327,11 @@ class ScreenRecordingService: NSObject, ObservableObject {
         // Hide overlay
         hideRecordingOverlay()
 
+        // Handle voice-only recording
+        if configuration.captureMode == .voiceOnly {
+            return try await stopVoiceOnlyRecording()
+        }
+
         // Stop capture
         try await stream?.stopCapture()
         stream = nil
@@ -336,6 +372,18 @@ class ScreenRecordingService: NSObject, ObservableObject {
         timer?.invalidate()
         hideRecordingOverlay()
 
+        // Handle voice-only recording
+        if configuration.captureMode == .voiceOnly {
+            audioRecorder?.stop()
+            audioRecorder = nil
+            if let url = currentFileURL {
+                try? FileManager.default.removeItem(at: url)
+            }
+            state = .idle
+            recordLogger.info("❌ Voice recording cancelled")
+            return
+        }
+
         try? await stream?.stopCapture()
         stream = nil
 
@@ -351,6 +399,76 @@ class ScreenRecordingService: NSObject, ObservableObject {
 
         state = .idle
         recordLogger.info("❌ Recording cancelled")
+    }
+
+    // MARK: - Voice-Only Recording
+
+    /// Start voice-only recording using AVAudioRecorder
+    private func startVoiceOnlyRecording() async throws {
+        state = .preparing
+        recordLogger.info("🎤 Starting voice-only recording")
+
+        // Create output file
+        let tempDir = FileManager.default.temporaryDirectory
+        let fileName = "voice_\(Date().timeIntervalSince1970).m4a"
+        let outputURL = tempDir.appendingPathComponent(fileName)
+        currentFileURL = outputURL
+
+        // Configure audio settings
+        let settings: [String: Any] = [
+            AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
+            AVSampleRateKey: 44100.0,
+            AVNumberOfChannelsKey: 2,
+            AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue
+        ]
+
+        do {
+            audioRecorder = try AVAudioRecorder(url: outputURL, settings: settings)
+            audioRecorder?.prepareToRecord()
+
+            guard audioRecorder?.record() == true else {
+                throw RecordingError.audioRecorderFailed
+            }
+
+            // Start timer
+            recordingStartTime = Date()
+            pausedDuration = 0
+            elapsedTime = 0
+            startTimer()
+
+            state = .recording(duration: 0)
+            recordLogger.info("🎤 Voice recording started")
+        } catch {
+            state = .error("Failed to start voice recording: \(error.localizedDescription)")
+            throw error
+        }
+    }
+
+    /// Stop voice-only recording and save
+    private func stopVoiceOnlyRecording() async throws -> URL {
+        audioRecorder?.stop()
+        audioRecorder = nil
+
+        guard let outputURL = currentFileURL else {
+            throw RecordingError.noOutputFile
+        }
+
+        // Move to Downloads
+        let downloadsURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first!
+        let finalURL = downloadsURL.appendingPathComponent(outputURL.lastPathComponent)
+
+        if FileManager.default.fileExists(atPath: finalURL.path) {
+            try FileManager.default.removeItem(at: finalURL)
+        }
+        try FileManager.default.moveItem(at: outputURL, to: finalURL)
+
+        state = .idle
+        recordLogger.info("✅ Voice recording saved to: \(finalURL.path)")
+
+        // Reveal in Finder
+        NSWorkspace.shared.selectFile(finalURL.path, inFileViewerRootedAtPath: "")
+
+        return finalURL
     }
 
     // MARK: - Frame Processing
@@ -642,6 +760,7 @@ enum RecordingError: LocalizedError {
     case noFramesCaptured
     case gifEncodingFailed
     case videoEncodingFailed
+    case audioRecorderFailed
 
     var errorDescription: String? {
         switch self {
@@ -653,6 +772,7 @@ enum RecordingError: LocalizedError {
         case .noFramesCaptured: return "No frames were captured"
         case .gifEncodingFailed: return "Failed to encode GIF"
         case .videoEncodingFailed: return "Failed to encode video"
+        case .audioRecorderFailed: return "Failed to start audio recording"
         }
     }
 }
