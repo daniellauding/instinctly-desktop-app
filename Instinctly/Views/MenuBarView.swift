@@ -62,6 +62,16 @@ struct MenuBarView: View {
 
             Divider()
 
+            // Recording Section
+            VStack(spacing: 2) {
+                MenuBarRecordingButton()
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 4)
+            }
+            .padding(.vertical, 4)
+
+            Divider()
+
             // Recent Captures (placeholder)
             if !recentCaptures.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
@@ -207,8 +217,8 @@ struct MenuButton: View {
 
                 Spacer()
 
-                if shortcut != nil {
-                    Text("5")
+                if let shortcut = shortcut {
+                    Text("⌘⇧\(shortcut)")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }

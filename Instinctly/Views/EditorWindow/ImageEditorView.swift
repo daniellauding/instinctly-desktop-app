@@ -132,6 +132,10 @@ struct EditorTopBar: View {
 
             Spacer()
 
+            // Recording button
+            QuickRecordButton()
+                .help("Record Screen")
+
             // Share & Export options
             HStack(spacing: 6) {
                 Button(action: copyToClipboard) {
