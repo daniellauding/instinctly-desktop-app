@@ -334,11 +334,21 @@ struct ShareSheet: View {
 
             Divider()
 
-            // Cloud Sharing
+            // Cloud Sharing (requires iCloud setup)
             VStack(alignment: .leading, spacing: 12) {
-                Text("Cloud Sharing")
-                    .font(.subheadline)
-                    .foregroundColor(.secondary)
+                HStack {
+                    Text("Cloud Sharing")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+
+                    Text("Beta")
+                        .font(.caption2)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.orange.opacity(0.2))
+                        .foregroundColor(.orange)
+                        .cornerRadius(4)
+                }
 
                 if let url = shareURL {
                     HStack {
@@ -378,9 +388,14 @@ struct ShareSheet: View {
                 }
 
                 if let error = errorMessage {
-                    Text(error)
-                        .font(.caption)
-                        .foregroundColor(.red)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(error)
+                            .font(.caption)
+                            .foregroundColor(.red)
+                        Text("Tip: Use 'Copy Image' or 'Save' for local sharing")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
                 }
             }
         }
@@ -402,6 +417,18 @@ struct ShareSheet: View {
                     annotations: annotations
                 )
                 shareURL = url
+            } catch let ckError as CKError {
+                // Handle specific CloudKit errors
+                switch ckError.code {
+                case .notAuthenticated:
+                    errorMessage = "Please sign in to iCloud in System Settings"
+                case .networkFailure, .networkUnavailable:
+                    errorMessage = "No internet connection"
+                case .quotaExceeded:
+                    errorMessage = "iCloud storage full"
+                default:
+                    errorMessage = "CloudKit error: \(ckError.localizedDescription)"
+                }
             } catch {
                 errorMessage = error.localizedDescription
             }
