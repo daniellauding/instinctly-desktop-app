@@ -64,9 +64,7 @@ struct MenuBarView: View {
 
             // Recording Section
             VStack(spacing: 2) {
-                MenuBarRecordingButton()
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 4)
+                RecordMenuButton()
             }
             .padding(.vertical, 4)
 
@@ -259,6 +257,61 @@ struct RecentCaptureRow: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 4)
+    }
+}
+
+// MARK: - Record Menu Button
+struct RecordMenuButton: View {
+    @StateObject private var recordingService = ScreenRecordingService.shared
+    @State private var showRecordingPanel = false
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: { showRecordingPanel.toggle() }) {
+            HStack(spacing: 12) {
+                ZStack {
+                    Circle()
+                        .stroke(recordingService.state.isRecording ? Color.red : Color.primary.opacity(0.3), lineWidth: 1.5)
+                        .frame(width: 18, height: 18)
+
+                    if recordingService.state.isRecording {
+                        Circle()
+                            .fill(Color.red)
+                            .frame(width: 8, height: 8)
+                    }
+                }
+                .frame(width: 20)
+
+                if recordingService.state.isRecording || recordingService.state.isPaused {
+                    Text(formatTime(recordingService.elapsedTime))
+                        .font(.system(.body, design: .monospaced))
+                        .foregroundColor(.red)
+                } else {
+                    Text("Record")
+                        .foregroundColor(.primary)
+                }
+
+                Spacer()
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            .background(isHovered ? Color.primary.opacity(0.1) : Color.clear)
+            .cornerRadius(6)
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering in
+            isHovered = hovering
+        }
+        .padding(.horizontal, 8)
+        .popover(isPresented: $showRecordingPanel) {
+            RecordingControlsView()
+        }
+    }
+
+    private func formatTime(_ time: TimeInterval) -> String {
+        let minutes = Int(time) / 60
+        let seconds = Int(time) % 60
+        return String(format: "%d:%02d", minutes, seconds)
     }
 }
 

@@ -1,5 +1,6 @@
 import SwiftUI
 import AVFoundation
+import ScreenCaptureKit
 
 // MARK: - Recording Controls View (Floating Panel)
 struct RecordingControlsView: View {
@@ -378,7 +379,9 @@ struct RecordingSetupView: View {
     @Binding var configuration: RecordingConfiguration
     let onStart: () -> Void
 
-    @State private var showRegionPicker = false
+    @State private var showWindowPicker = false
+    @State private var showRegionSelector = false
+    @State private var selectedWindowInfo: String?
 
     private var isVoiceOnly: Bool {
         configuration.captureMode == .voiceOnly
@@ -389,6 +392,14 @@ struct RecordingSetupView: View {
             return [.m4a]
         } else {
             return [.gif, .mp4, .webm, .mov]
+        }
+    }
+
+    private var needsSelection: Bool {
+        switch configuration.captureMode {
+        case .window: return configuration.windowID == nil
+        case .region: return configuration.region == nil
+        default: return false
         }
     }
 
@@ -413,7 +424,28 @@ struct RecordingSetupView: View {
                     } else if configuration.outputFormat == .m4a {
                         configuration.outputFormat = .mp4
                     }
+                    // Clear previous selection when mode changes
+                    configuration.windowID = nil
+                    configuration.region = nil
+                    selectedWindowInfo = nil
                 }
+            }
+
+            // Selection status for window/region modes
+            if configuration.captureMode == .window {
+                SelectionStatusView(
+                    icon: "macwindow",
+                    title: selectedWindowInfo ?? "No window selected",
+                    isSelected: configuration.windowID != nil,
+                    onSelect: { showWindowPicker = true }
+                )
+            } else if configuration.captureMode == .region {
+                SelectionStatusView(
+                    icon: "rectangle.dashed",
+                    title: configuration.region != nil ? "Region: \(Int(configuration.region!.width))x\(Int(configuration.region!.height))" : "No region selected",
+                    isSelected: configuration.region != nil,
+                    onSelect: { showRegionSelector = true }
+                )
             }
 
             // Output Format (hide for voice-only since it's always M4A)
@@ -511,27 +543,423 @@ struct RecordingSetupView: View {
             Divider()
 
             // Start button
-            Button(action: onStart) {
+            Button(action: handleStartButton) {
                 HStack {
-                    Image(systemName: isVoiceOnly ? "mic.fill" : "record.circle")
+                    Image(systemName: startButtonIcon)
                     Text(startButtonText)
                 }
                 .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
-            .tint(isVoiceOnly ? .blue : .red)
+            .tint(startButtonTint)
             .controlSize(.large)
+            .disabled(needsSelection && !canSelectNow)
         }
+        .sheet(isPresented: $showWindowPicker) {
+            RecordingWindowPickerView { windowID, windowTitle in
+                configuration.windowID = windowID
+                selectedWindowInfo = windowTitle
+                showWindowPicker = false
+            }
+        }
+        .onChange(of: showRegionSelector) { _, show in
+            if show {
+                // Show region selector overlay
+                selectRegionForRecording()
+            }
+        }
+    }
+
+    private var canSelectNow: Bool {
+        configuration.captureMode == .window || configuration.captureMode == .region
+    }
+
+    private func handleStartButton() {
+        switch configuration.captureMode {
+        case .window:
+            if configuration.windowID == nil {
+                showWindowPicker = true
+            } else {
+                onStart()
+            }
+        case .region:
+            if configuration.region == nil {
+                selectRegionForRecording()
+            } else {
+                onStart()
+            }
+        default:
+            onStart()
+        }
+    }
+
+    private func selectRegionForRecording() {
+        // Use the existing RegionSelectionOverlay but for recording
+        Task { @MainActor in
+            let selector = RecordingRegionSelector()
+            if let region = await selector.selectRegion() {
+                configuration.region = region
+            }
+        }
+    }
+
+    private var startButtonIcon: String {
+        if needsSelection {
+            return configuration.captureMode == .window ? "macwindow" : "rectangle.dashed"
+        }
+        return isVoiceOnly ? "mic.fill" : "record.circle"
+    }
+
+    private var startButtonTint: Color {
+        if needsSelection {
+            return .accentColor
+        }
+        return isVoiceOnly ? .blue : .red
     }
 
     private var startButtonText: String {
         switch configuration.captureMode {
-        case .region: return "Select Region & Record"
-        case .window: return "Select Window & Record"
-        case .fullScreen: return "Start Recording"
-        case .voiceOnly: return "Start Voice Recording"
+        case .region:
+            return configuration.region == nil ? "Select Region" : "Start Recording"
+        case .window:
+            return configuration.windowID == nil ? "Select Window" : "Start Recording"
+        case .fullScreen:
+            return "Start Recording"
+        case .voiceOnly:
+            return "Start Voice Recording"
         }
     }
+}
+
+// MARK: - Selection Status View
+struct SelectionStatusView: View {
+    let icon: String
+    let title: String
+    let isSelected: Bool
+    let onSelect: () -> Void
+
+    var body: some View {
+        Button(action: onSelect) {
+            HStack {
+                Image(systemName: icon)
+                    .foregroundColor(isSelected ? .green : .secondary)
+                Text(title)
+                    .font(.caption)
+                Spacer()
+                if isSelected {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundColor(.green)
+                } else {
+                    Text("Select")
+                        .font(.caption)
+                        .foregroundColor(.accentColor)
+                }
+            }
+            .padding(10)
+            .background(isSelected ? Color.green.opacity(0.1) : Color.secondary.opacity(0.1))
+            .cornerRadius(8)
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+// MARK: - Recording Window Picker
+struct RecordingWindowPickerView: View {
+    let onSelect: (CGWindowID, String) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var windows: [(id: CGWindowID, title: String, appName: String, icon: NSImage?)] = []
+    @State private var isLoading = true
+
+    var body: some View {
+        VStack(spacing: 16) {
+            HStack {
+                Text("Select Window to Record")
+                    .font(.headline)
+                Spacer()
+                Button("Cancel") { dismiss() }
+            }
+
+            if isLoading {
+                ProgressView("Loading windows...")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if windows.isEmpty {
+                VStack(spacing: 8) {
+                    Image(systemName: "macwindow")
+                        .font(.largeTitle)
+                        .foregroundColor(.secondary)
+                    Text("No windows found")
+                        .foregroundColor(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 8) {
+                        ForEach(windows, id: \.id) { window in
+                            WindowRowView(
+                                title: window.title,
+                                appName: window.appName,
+                                icon: window.icon
+                            ) {
+                                onSelect(window.id, "\(window.appName): \(window.title)")
+                                dismiss()
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .padding(20)
+        .frame(width: 400, height: 400)
+        .onAppear {
+            loadWindows()
+        }
+    }
+
+    private func loadWindows() {
+        Task {
+            do {
+                let content = try await SCShareableContent.current
+                let windowList = content.windows.compactMap { window -> (id: CGWindowID, title: String, appName: String, icon: NSImage?)? in
+                    guard let title = window.title, !title.isEmpty,
+                          let app = window.owningApplication,
+                          app.bundleIdentifier != Bundle.main.bundleIdentifier else {
+                        return nil
+                    }
+                    let appName = app.applicationName
+                    let icon = NSRunningApplication(processIdentifier: app.processID)?.icon
+                    return (window.windowID, title, appName, icon)
+                }
+
+                await MainActor.run {
+                    windows = windowList
+                    isLoading = false
+                }
+            } catch {
+                await MainActor.run {
+                    isLoading = false
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Window Row View
+struct WindowRowView: View {
+    let title: String
+    let appName: String
+    let icon: NSImage?
+    let onSelect: () -> Void
+
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: onSelect) {
+            HStack(spacing: 12) {
+                if let icon = icon {
+                    Image(nsImage: icon)
+                        .resizable()
+                        .frame(width: 32, height: 32)
+                } else {
+                    Image(systemName: "macwindow")
+                        .frame(width: 32, height: 32)
+                }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.system(size: 13))
+                        .lineLimit(1)
+                    Text(appName)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+
+                Spacer()
+
+                Image(systemName: "chevron.right")
+                    .foregroundColor(.secondary)
+            }
+            .padding(10)
+            .background(isHovered ? Color.accentColor.opacity(0.1) : Color.secondary.opacity(0.05))
+            .cornerRadius(8)
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+    }
+}
+
+// MARK: - Recording Region Selector
+@MainActor
+class RecordingRegionSelector {
+    func selectRegion() async -> CGRect? {
+        await withCheckedContinuation { continuation in
+            let window = RegionSelectionWindowForRecording { rect in
+                continuation.resume(returning: rect)
+            }
+            window.makeKeyAndOrderFront(nil)
+        }
+    }
+}
+
+// MARK: - Region Selection Window for Recording
+class RegionSelectionWindowForRecording: NSWindow {
+    private var selectionView: RegionSelectionViewForRecording!
+    private var onComplete: ((CGRect?) -> Void)?
+
+    init(onComplete: @escaping (CGRect?) -> Void) {
+        self.onComplete = onComplete
+
+        guard let screen = NSScreen.main else {
+            onComplete(nil)
+            super.init(contentRect: .zero, styleMask: [], backing: .buffered, defer: false)
+            return
+        }
+
+        super.init(
+            contentRect: screen.frame,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+
+        self.level = NSWindow.Level(rawValue: Int(CGShieldingWindowLevel()) + 1)
+        self.isOpaque = false
+        self.backgroundColor = .clear
+        self.ignoresMouseEvents = false
+        self.acceptsMouseMovedEvents = true
+        self.hasShadow = false
+
+        selectionView = RegionSelectionViewForRecording(frame: screen.frame) { [weak self] rect in
+            self?.close()
+            self?.onComplete?(rect)
+        }
+        self.contentView = selectionView
+    }
+
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
+}
+
+// MARK: - Region Selection View for Recording
+class RegionSelectionViewForRecording: NSView {
+    private var startPoint: NSPoint?
+    private var currentPoint: NSPoint?
+    private var onComplete: ((CGRect?) -> Void)?
+
+    init(frame: NSRect, onComplete: @escaping (CGRect?) -> Void) {
+        self.onComplete = onComplete
+        super.init(frame: frame)
+        addTrackingArea(NSTrackingArea(
+            rect: bounds,
+            options: [.activeAlways, .mouseMoved, .mouseEnteredAndExited],
+            owner: self,
+            userInfo: nil
+        ))
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func draw(_ dirtyRect: NSRect) {
+        // Semi-transparent overlay
+        NSColor.black.withAlphaComponent(0.3).setFill()
+        dirtyRect.fill()
+
+        // Selection rectangle
+        if let start = startPoint, let current = currentPoint {
+            let rect = NSRect(
+                x: min(start.x, current.x),
+                y: min(start.y, current.y),
+                width: abs(current.x - start.x),
+                height: abs(current.y - start.y)
+            )
+
+            // Clear the selection area
+            NSColor.clear.setFill()
+            rect.fill()
+
+            // Draw border
+            NSColor.systemBlue.setStroke()
+            let path = NSBezierPath(rect: rect)
+            path.lineWidth = 2
+            path.stroke()
+
+            // Draw size label
+            let sizeText = "\(Int(rect.width)) × \(Int(rect.height))"
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: 12, weight: .medium),
+                .foregroundColor: NSColor.white,
+                .backgroundColor: NSColor.black.withAlphaComponent(0.7)
+            ]
+            let textSize = sizeText.size(withAttributes: attrs)
+            let textRect = NSRect(
+                x: rect.midX - textSize.width / 2,
+                y: rect.maxY + 8,
+                width: textSize.width + 8,
+                height: textSize.height + 4
+            )
+            NSColor.black.withAlphaComponent(0.7).setFill()
+            NSBezierPath(roundedRect: textRect, xRadius: 4, yRadius: 4).fill()
+            sizeText.draw(at: NSPoint(x: textRect.minX + 4, y: textRect.minY + 2), withAttributes: attrs)
+        }
+
+        // Instructions
+        let instructions = "Drag to select recording region • Press Esc to cancel"
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 14),
+            .foregroundColor: NSColor.white
+        ]
+        let textSize = instructions.size(withAttributes: attrs)
+        instructions.draw(at: NSPoint(x: bounds.midX - textSize.width / 2, y: bounds.maxY - 50), withAttributes: attrs)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        startPoint = convert(event.locationInWindow, from: nil)
+        currentPoint = startPoint
+        needsDisplay = true
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        currentPoint = convert(event.locationInWindow, from: nil)
+        needsDisplay = true
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard let start = startPoint, let current = currentPoint else {
+            onComplete?(nil)
+            return
+        }
+
+        let rect = CGRect(
+            x: min(start.x, current.x),
+            y: min(start.y, current.y),
+            width: abs(current.x - start.x),
+            height: abs(current.y - start.y)
+        )
+
+        if rect.width > 10 && rect.height > 10 {
+            // Convert to screen coordinates (flip Y)
+            if let screen = NSScreen.main {
+                let screenRect = CGRect(
+                    x: rect.origin.x,
+                    y: screen.frame.height - rect.origin.y - rect.height,
+                    width: rect.width,
+                    height: rect.height
+                )
+                onComplete?(screenRect)
+            } else {
+                onComplete?(rect)
+            }
+        } else {
+            onComplete?(nil)
+        }
+    }
+
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 53 { // Escape
+            onComplete?(nil)
+        }
+    }
+
+    override var acceptsFirstResponder: Bool { true }
 }
 
 // MARK: - Recording Active View
