@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Instinctly - Shared Image</title>
-    <script src="https://cdn.apple-cloudkit.com/ck/2/cloudkit.min.js" async></script>
+    <script src="https://cdn.apple-cloudkit.com/ck/2/cloudkit.js" async></script>
     <style>
         * {
             margin: 0;
@@ -426,9 +426,20 @@
         }
 
         // Wait for CloudKit to load, then start
+        let waitAttempts = 0;
         function waitForCloudKit() {
+            waitAttempts++;
+            updateStatus('Waiting for CloudKit... (' + waitAttempts + ')');
+
             if (typeof CloudKit !== 'undefined') {
+                updateStatus('CloudKit loaded!');
                 init();
+            } else if (waitAttempts > 50) {
+                // 5 seconds timeout
+                displayError(
+                    'CloudKit library failed to load',
+                    'The Apple CloudKit JS library could not be loaded. This may be due to ad blockers or network issues.'
+                );
             } else {
                 // CloudKit not loaded yet, wait and retry
                 setTimeout(waitForCloudKit, 100);
