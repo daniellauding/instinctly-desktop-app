@@ -1,5 +1,6 @@
 import SwiftUI
 import AVFoundation
+import AVKit
 import ScreenCaptureKit
 import os.log
 
@@ -11,6 +12,7 @@ struct RecordingControlsView: View {
     @State private var lastRecordingURL: URL?
     @State private var showClipEditor = false
     @State private var showShareSheet = false
+    @State private var showDiscardAlert = false
 
     var body: some View {
         VStack(spacing: 16) {
@@ -30,22 +32,35 @@ struct RecordingControlsView: View {
 
             Divider()
 
-            // Show completion view if we have a recording
+            // Show preview view if we have a recording ready
             if let recordingURL = lastRecordingURL, recordingService.state == .idle {
-                RecordingCompleteView(
+                RecordingPreviewView(
                     fileURL: recordingURL,
+                    onSave: {
+                        Task {
+                            do {
+                                let savedURL = try await recordingService.saveRecording(tempURL: recordingURL)
+                                print("✅ Recording saved to: \(savedURL.path)")
+                                lastRecordingURL = nil
+                                dismiss()
+                            } catch {
+                                print("❌ Failed to save recording: \(error)")
+                            }
+                        }
+                    },
                     onEdit: {
                         showClipEditor = true
                     },
                     onShare: {
                         showShareSheet = true
                     },
-                    onNewRecording: {
-                        lastRecordingURL = nil
+                    onDiscard: {
+                        showDiscardAlert = true
                     },
-                    onDismiss: {
+                    onNewRecording: {
+                        // Discard current and start fresh
+                        recordingService.discardRecording(tempURL: recordingURL)
                         lastRecordingURL = nil
-                        dismiss()
                     }
                 )
             } else {
@@ -131,34 +146,102 @@ struct RecordingControlsView: View {
                 RecordingShareSheet(fileURL: url)
             }
         }
+        .alert("Discard Recording?", isPresented: $showDiscardAlert) {
+            Button("Cancel", role: .cancel) { }
+            Button("Discard", role: .destructive) {
+                if let url = lastRecordingURL {
+                    recordingService.discardRecording(tempURL: url)
+                    lastRecordingURL = nil
+                }
+            }
+        } message: {
+            Text("This recording will be permanently deleted.")
+        }
     }
 }
 
-// MARK: - Recording Complete View
-struct RecordingCompleteView: View {
+// MARK: - Recording Preview View (shows video preview before save)
+struct RecordingPreviewView: View {
     let fileURL: URL
+    let onSave: () -> Void
     let onEdit: () -> Void
     let onShare: () -> Void
+    let onDiscard: () -> Void
     let onNewRecording: () -> Void
-    let onDismiss: () -> Void
+
+    @State private var player: AVPlayer?
+    @State private var isPlaying = false
+    @State private var isSaving = false
+
+    private var isVideoFile: Bool {
+        let ext = fileURL.pathExtension.lowercased()
+        return ["mp4", "mov", "webm"].contains(ext)
+    }
+
+    private var isGif: Bool {
+        fileURL.pathExtension.lowercased() == "gif"
+    }
 
     var body: some View {
-        VStack(spacing: 16) {
-            // Success icon
-            Image(systemName: "checkmark.circle.fill")
-                .font(.system(size: 48))
-                .foregroundColor(.green)
+        VStack(spacing: 12) {
+            // Preview header
+            HStack {
+                Image(systemName: "film")
+                    .foregroundColor(.blue)
+                Text("Recording Preview")
+                    .font(.headline)
+                Spacer()
+            }
 
-            Text("Recording Saved!")
-                .font(.headline)
+            // Video/GIF preview
+            ZStack {
+                if isVideoFile, let player = player {
+                    VideoPlayer(player: player)
+                        .frame(height: 180)
+                        .cornerRadius(8)
+                        .onAppear {
+                            player.play()
+                            isPlaying = true
+                        }
+                        .onDisappear {
+                            player.pause()
+                        }
+                } else if isGif {
+                    // GIF preview (simple image for now)
+                    AsyncImage(url: fileURL) { image in
+                        image
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                    } placeholder: {
+                        ProgressView()
+                    }
+                    .frame(height: 180)
+                    .cornerRadius(8)
+                } else {
+                    // Audio waveform placeholder
+                    VStack {
+                        Image(systemName: "waveform")
+                            .font(.system(size: 48))
+                            .foregroundColor(.blue)
+                        Text("Voice Recording")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .frame(height: 120)
+                    .frame(maxWidth: .infinity)
+                    .background(Color.secondary.opacity(0.1))
+                    .cornerRadius(8)
+                }
+            }
 
             // File info
-            VStack(spacing: 4) {
+            HStack {
                 Text(fileURL.lastPathComponent)
                     .font(.caption)
                     .lineLimit(1)
                     .truncationMode(.middle)
-
+                    .foregroundColor(.secondary)
+                Spacer()
                 if let attrs = try? FileManager.default.attributesOfItem(atPath: fileURL.path),
                    let size = attrs[.size] as? Int64 {
                     Text(formatFileSize(size))
@@ -166,31 +249,99 @@ struct RecordingCompleteView: View {
                         .foregroundColor(.secondary)
                 }
             }
-            .padding(8)
-            .background(Color.secondary.opacity(0.1))
-            .cornerRadius(6)
 
-            // Action buttons
+            // Playback controls for video
+            if isVideoFile {
+                HStack(spacing: 20) {
+                    Button(action: {
+                        player?.seek(to: .zero)
+                        player?.play()
+                        isPlaying = true
+                    }) {
+                        Image(systemName: "backward.fill")
+                    }
+                    .buttonStyle(.plain)
+
+                    Button(action: {
+                        if isPlaying {
+                            player?.pause()
+                        } else {
+                            player?.play()
+                        }
+                        isPlaying.toggle()
+                    }) {
+                        Image(systemName: isPlaying ? "pause.fill" : "play.fill")
+                            .font(.title2)
+                    }
+                    .buttonStyle(.plain)
+
+                    Button(action: {
+                        // Open in QuickTime for full preview
+                        NSWorkspace.shared.open(fileURL)
+                    }) {
+                        Image(systemName: "arrow.up.left.and.arrow.down.right")
+                    }
+                    .buttonStyle(.plain)
+                    .help("Open in QuickTime")
+                }
+                .padding(.vertical, 4)
+            }
+
+            Divider()
+
+            // Action buttons - primary row
+            HStack(spacing: 12) {
+                // Save button (prominent)
+                Button(action: {
+                    isSaving = true
+                    onSave()
+                }) {
+                    HStack {
+                        if isSaving {
+                            ProgressView()
+                                .scaleEffect(0.7)
+                        } else {
+                            Image(systemName: "square.and.arrow.down")
+                        }
+                        Text("Save")
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(isSaving)
+
+                // Discard button
+                Button(action: onDiscard) {
+                    HStack {
+                        Image(systemName: "trash")
+                        Text("Discard")
+                    }
+                }
+                .buttonStyle(.bordered)
+                .tint(.red)
+            }
+
+            // Secondary actions
             HStack(spacing: 12) {
                 Button(action: onEdit) {
                     VStack(spacing: 4) {
                         Image(systemName: "scissors")
-                            .font(.title2)
+                            .font(.title3)
                         Text("Trim")
-                            .font(.caption)
+                            .font(.caption2)
                     }
-                    .frame(width: 70, height: 60)
+                    .frame(width: 60, height: 50)
                 }
                 .buttonStyle(.bordered)
 
                 Button(action: onShare) {
                     VStack(spacing: 4) {
                         Image(systemName: "square.and.arrow.up")
-                            .font(.title2)
+                            .font(.title3)
                         Text("Share")
-                            .font(.caption)
+                            .font(.caption2)
                     }
-                    .frame(width: 70, height: 60)
+                    .frame(width: 60, height: 50)
                 }
                 .buttonStyle(.bordered)
 
@@ -199,28 +350,43 @@ struct RecordingCompleteView: View {
                 }) {
                     VStack(spacing: 4) {
                         Image(systemName: "folder")
-                            .font(.title2)
+                            .font(.title3)
                         Text("Reveal")
-                            .font(.caption)
+                            .font(.caption2)
                     }
-                    .frame(width: 70, height: 60)
+                    .frame(width: 60, height: 50)
+                }
+                .buttonStyle(.bordered)
+
+                Button(action: onNewRecording) {
+                    VStack(spacing: 4) {
+                        Image(systemName: "record.circle")
+                            .font(.title3)
+                        Text("New")
+                            .font(.caption2)
+                    }
+                    .frame(width: 60, height: 50)
                 }
                 .buttonStyle(.bordered)
             }
-
-            Divider()
-
-            HStack {
-                Button("New Recording") {
-                    onNewRecording()
+        }
+        .onAppear {
+            if isVideoFile {
+                player = AVPlayer(url: fileURL)
+                // Loop playback
+                NotificationCenter.default.addObserver(
+                    forName: .AVPlayerItemDidPlayToEndTime,
+                    object: player?.currentItem,
+                    queue: .main
+                ) { _ in
+                    self.player?.seek(to: .zero)
+                    self.player?.play()
                 }
-                .buttonStyle(.borderedProminent)
-
-                Button("Done") {
-                    onDismiss()
-                }
-                .buttonStyle(.bordered)
             }
+        }
+        .onDisappear {
+            player?.pause()
+            player = nil
         }
     }
 

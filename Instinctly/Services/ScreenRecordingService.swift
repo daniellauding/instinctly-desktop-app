@@ -175,6 +175,13 @@ class ScreenRecordingService: NSObject, ObservableObject {
     // Voice-only recording
     private var audioRecorder: AVAudioRecorder?
 
+    // Region capture - store for frame cropping
+    private var captureRegion: CGRect?
+    private var displayScaleFactor: CGFloat = 2.0
+
+    // Preview callback - called when recording stops to show preview
+    var onRecordingComplete: ((URL) -> Void)?
+
     override init() {
         super.init()
         recordLogger.info("🎬 ScreenRecordingService initialized")
@@ -220,13 +227,16 @@ class ScreenRecordingService: NSObject, ObservableObject {
                 filter = SCContentFilter(desktopIndependentWindow: window)
 
             case .region:
-                guard configuration.region != nil else {
+                guard let region = configuration.region else {
                     throw RecordingError.noRegionSelected
                 }
                 guard let display = content.displays.first else {
                     throw RecordingError.noDisplayAvailable
                 }
-                // For region, we capture full display and crop later
+                // Store region for frame processing and set display scale
+                captureRegion = region
+                displayScaleFactor = NSScreen.main?.backingScaleFactor ?? 2.0
+                recordLogger.info("📐 Recording region: \(region.debugDescription), scale: \(self.displayScaleFactor)")
                 filter = SCContentFilter(display: display, excludingWindows: [])
 
             case .voiceOnly:
@@ -236,8 +246,19 @@ class ScreenRecordingService: NSObject, ObservableObject {
 
             // Configure stream
             let streamConfig = SCStreamConfiguration()
-            streamConfig.width = Int(filter.contentRect.width) * 2
-            streamConfig.height = Int(filter.contentRect.height) * 2
+
+            // For region mode, use sourceRect to capture only the selected area
+            if configuration.captureMode == .region, let region = captureRegion {
+                // sourceRect is in points, SCStream will handle scaling
+                streamConfig.sourceRect = region
+                streamConfig.width = Int(region.width * displayScaleFactor)
+                streamConfig.height = Int(region.height * displayScaleFactor)
+                recordLogger.info("📐 Stream config: sourceRect=\(region.debugDescription), output=\(streamConfig.width)x\(streamConfig.height)")
+            } else {
+                streamConfig.width = Int(filter.contentRect.width * displayScaleFactor)
+                streamConfig.height = Int(filter.contentRect.height * displayScaleFactor)
+            }
+
             streamConfig.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(configuration.frameRate))
             streamConfig.showsCursor = true
             streamConfig.queueDepth = 5
@@ -318,7 +339,7 @@ class ScreenRecordingService: NSObject, ObservableObject {
         recordLogger.info("▶️ Recording resumed")
     }
 
-    /// Stop recording and save
+    /// Stop recording and return temp URL for preview (no save dialog)
     func stopRecording() async throws -> URL {
         guard state.isRecording || state.isPaused else {
             throw RecordingError.notRecording
@@ -334,7 +355,7 @@ class ScreenRecordingService: NSObject, ObservableObject {
 
         // Handle voice-only recording
         if configuration.captureMode == .voiceOnly {
-            return try await stopVoiceOnlyRecording()
+            return try await stopVoiceOnlyRecordingForPreview()
         }
 
         // Stop capture
@@ -354,19 +375,35 @@ class ScreenRecordingService: NSObject, ObservableObject {
             await finalizeAssetWriter()
         }
 
-        // Save using NSSavePanel for proper sandbox permissions
-        let finalURL = try await saveRecordingWithPanel(tempURL: outputURL)
+        // Clear region capture state
+        captureRegion = nil
 
         state = .idle
+        recordLogger.info("✅ Recording ready for preview: \(outputURL.path)")
+
+        // Return temp URL - UI will show preview with save option
+        return outputURL
+    }
+
+    /// Save the recording to user-selected location (called from preview)
+    func saveRecording(tempURL: URL) async throws -> URL {
+        recordLogger.info("💾 Saving recording from preview...")
+
+        // Save using NSSavePanel for proper sandbox permissions
+        let finalURL = try await saveRecordingWithPanel(tempURL: tempURL)
+
         recordLogger.info("✅ Recording saved to: \(finalURL.path)")
 
         // Also save to library for Collections view
         await saveToLibrary(url: finalURL)
 
-        // Open the recording in the default app (e.g., QuickTime for videos)
-        NSWorkspace.shared.open(finalURL)
-
         return finalURL
+    }
+
+    /// Delete temp recording file (if user cancels/discards from preview)
+    func discardRecording(tempURL: URL) {
+        recordLogger.info("🗑️ Discarding recording: \(tempURL.path)")
+        try? FileManager.default.removeItem(at: tempURL)
     }
 
     /// Save recording to local library
@@ -515,8 +552,8 @@ class ScreenRecordingService: NSObject, ObservableObject {
         }
     }
 
-    /// Stop voice-only recording and save
-    private func stopVoiceOnlyRecording() async throws -> URL {
+    /// Stop voice-only recording and return temp URL for preview
+    private func stopVoiceOnlyRecordingForPreview() async throws -> URL {
         audioRecorder?.stop()
         audioRecorder = nil
 
@@ -524,19 +561,11 @@ class ScreenRecordingService: NSObject, ObservableObject {
             throw RecordingError.noOutputFile
         }
 
-        // Save using NSSavePanel for proper sandbox permissions
-        let finalURL = try await saveRecordingWithPanel(tempURL: outputURL)
-
         state = .idle
-        recordLogger.info("✅ Voice recording saved to: \(finalURL.path)")
+        recordLogger.info("✅ Voice recording ready for preview: \(outputURL.path)")
 
-        // Also save to library for Collections view
-        await saveToLibrary(url: finalURL)
-
-        // Open the recording in the default app
-        NSWorkspace.shared.open(finalURL)
-
-        return finalURL
+        // Return temp URL - UI will show preview with save option
+        return outputURL
     }
 
     // MARK: - Frame Processing
