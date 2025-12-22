@@ -17,6 +17,20 @@ struct MainWindowView: View {
         libraryService.collections.filter { !["Screenshots", "Recordings", "Favorites"].contains($0) }
     }
 
+    // Sync status text
+    private var syncStatusText: String {
+        switch libraryService.syncStatus {
+        case .idle:
+            return libraryService.iCloudAvailable ? "Ready" : "iCloud not available"
+        case .syncing:
+            return "Syncing..."
+        case .synced:
+            return "\(libraryService.items.count) items"
+        case .error(let msg):
+            return "Error: \(msg)"
+        }
+    }
+
     var body: some View {
         NavigationSplitView {
             // Sidebar
@@ -85,6 +99,34 @@ struct MainWindowView: View {
                     Button(action: { showNewProjectSheet = true }) {
                         Label("New Project", systemImage: "plus.circle")
                     }
+                }
+
+                // iCloud Sync Status
+                Section {
+                    HStack {
+                        Image(systemName: libraryService.iCloudAvailable ? "icloud.fill" : "icloud.slash")
+                            .foregroundColor(libraryService.iCloudAvailable ? .blue : .secondary)
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(libraryService.iCloudAvailable ? "iCloud Sync" : "Local Only")
+                                .font(.caption)
+                            Text(syncStatusText)
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+
+                        Spacer()
+
+                        if libraryService.iCloudAvailable {
+                            Button(action: { libraryService.forceSync() }) {
+                                Image(systemName: "arrow.triangle.2.circlepath")
+                                    .font(.caption)
+                            }
+                            .buttonStyle(.plain)
+                            .help("Force Sync")
+                        }
+                    }
+                    .padding(.vertical, 4)
                 }
             }
             .listStyle(.sidebar)
