@@ -202,6 +202,7 @@
             <div class="loading">
                 <div class="spinner"></div>
                 <p>Loading shared image...</p>
+                <p id="status" style="font-size: 12px; opacity: 0.6; margin-top: 10px;">Initializing...</p>
             </div>
         </div>
 
@@ -233,12 +234,18 @@
         async function initCloudKit() {
             return new Promise((resolve, reject) => {
                 try {
+                    console.log('Configuring CloudKit with container:', CLOUDKIT_CONFIG.containerIdentifier);
+                    console.log('Environment:', CLOUDKIT_CONFIG.environment);
+
                     CloudKit.configure({
                         containers: [CLOUDKIT_CONFIG]
                     });
 
                     const container = CloudKit.getDefaultContainer();
+                    console.log('Container obtained:', container ? 'yes' : 'no');
+
                     const publicDB = container.publicCloudDatabase;
+                    console.log('Public DB obtained:', publicDB ? 'yes' : 'no');
 
                     console.log('CloudKit initialized successfully');
                     resolve(publicDB);
@@ -377,10 +384,17 @@
             }
         }
 
+        // Update status on page
+        function updateStatus(msg) {
+            const el = document.getElementById('status');
+            if (el) el.textContent = msg;
+            console.log('Status:', msg);
+        }
+
         // Initialize
         async function init() {
             const shareId = getShareId();
-            console.log('Initializing with share ID:', shareId);
+            updateStatus('Share ID: ' + (shareId || 'none'));
 
             if (!shareId) {
                 displayError('No share ID provided', 'Add ?id=YOUR_SHARE_ID to the URL');
@@ -394,9 +408,9 @@
             }
 
             try {
-                console.log('Attempting to fetch from CloudKit...');
+                updateStatus('Connecting to CloudKit...');
                 const data = await fetchSharedImage(shareId);
-                console.log('Data received:', data);
+                updateStatus('Image data received');
                 if (data.imageAsset && data.imageAsset.downloadURL) {
                     displayImage(data);
                 } else {
