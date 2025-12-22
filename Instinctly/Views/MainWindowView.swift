@@ -6,20 +6,21 @@ struct MainWindowView: View {
     @Environment(\.openWindow) private var openWindow
     @StateObject private var captureService = ScreenCaptureService()
     @StateObject private var recordingService = ScreenRecordingService.shared
+    @StateObject private var libraryService = LibraryService.shared
     @State private var showWindowPicker = false
     @State private var showNewProjectSheet = false
     @State private var newProjectName = ""
-    @State private var customProjects: [String] = []
+    @State private var selectedCollection: String? = nil
 
-    init() {
-        // Load saved projects
-        _customProjects = State(initialValue: UserDefaults.standard.stringArray(forKey: "customProjects") ?? [])
+    // Custom collections (excluding built-in ones)
+    private var customProjects: [String] {
+        libraryService.collections.filter { !["Screenshots", "Recordings", "Favorites"].contains($0) }
     }
 
     var body: some View {
         NavigationSplitView {
             // Sidebar
-            List {
+            List(selection: $selectedCollection) {
                 Section("Quick Actions") {
                     Button(action: captureRegion) {
                         Label("Capture Region", systemImage: "rectangle.dashed")
@@ -46,15 +47,19 @@ struct MainWindowView: View {
                 }
 
                 Section("Library") {
-                    NavigationLink(value: "all") {
+                    NavigationLink(value: "All") {
                         Label("All Images", systemImage: "photo.on.rectangle")
                     }
 
-                    NavigationLink(value: "screenshots") {
+                    NavigationLink(value: "Screenshots") {
                         Label("Screenshots", systemImage: "camera.viewfinder")
                     }
 
-                    NavigationLink(value: "favorites") {
+                    NavigationLink(value: "Recordings") {
+                        Label("Recordings", systemImage: "video")
+                    }
+
+                    NavigationLink(value: "Favorites") {
                         Label("Favorites", systemImage: "star")
                     }
                 }
@@ -85,24 +90,32 @@ struct MainWindowView: View {
             .listStyle(.sidebar)
             .frame(minWidth: 200)
         } detail: {
-            // Main content
-            VStack(spacing: 0) {
-                if appState.currentImage != nil {
-                    // Show editor if image is loaded
-                    ImageEditorView(imageId: nil)
-                } else {
-                    // Welcome/empty state
-                    WelcomeView(
-                        onCaptureRegion: captureRegion,
-                        onCaptureWindow: captureWindow,
-                        onCaptureFullScreen: captureFullScreen,
-                        onOpenFromClipboard: openFromClipboard
-                    )
-                }
+            // Main content - show library grid or editor
+            if appState.currentImage != nil {
+                // Show editor if image is loaded
+                ImageEditorView(imageId: nil)
+            } else if let collection = selectedCollection {
+                // Show library items for selected collection
+                LibraryGridView(collection: collection, libraryService: libraryService, appState: appState)
+            } else {
+                // Welcome/empty state
+                WelcomeView(
+                    onCaptureRegion: captureRegion,
+                    onCaptureWindow: captureWindow,
+                    onCaptureFullScreen: captureFullScreen,
+                    onOpenFromClipboard: openFromClipboard
+                )
             }
         }
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
+                if appState.currentImage != nil {
+                    Button(action: { appState.currentImage = nil }) {
+                        Label("Back to Library", systemImage: "arrow.left")
+                    }
+                    .help("Back to Library")
+                }
+
                 Button(action: captureRegion) {
                     Label("Capture", systemImage: "camera.viewfinder")
                 }
@@ -131,22 +144,17 @@ struct MainWindowView: View {
     private func createNewProject() {
         let name = newProjectName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { return }
-
-        if !customProjects.contains(name) {
-            customProjects.append(name)
-            saveProjects()
-        }
+        libraryService.addCollection(name)
         newProjectName = ""
         showNewProjectSheet = false
+        selectedCollection = name
     }
 
     private func deleteProject(_ name: String) {
-        customProjects.removeAll { $0 == name }
-        saveProjects()
-    }
-
-    private func saveProjects() {
-        UserDefaults.standard.set(customProjects, forKey: "customProjects")
+        libraryService.removeCollection(name)
+        if selectedCollection == name {
+            selectedCollection = nil
+        }
     }
 
     // MARK: - Actions
@@ -458,6 +466,224 @@ struct MainWindowNewProjectSheet: View {
         .onAppear {
             isNameFocused = true
         }
+    }
+}
+
+// MARK: - Library Grid View
+struct LibraryGridView: View {
+    let collection: String
+    @ObservedObject var libraryService: LibraryService
+    @ObservedObject var appState: AppState
+
+    @State private var searchText = ""
+
+    private let columns = [GridItem(.adaptive(minimum: 150, maximum: 200), spacing: 16)]
+
+    private var items: [LibraryItem] {
+        var result = libraryService.items(in: collection)
+        if !searchText.isEmpty {
+            result = result.filter { $0.name.localizedCaseInsensitiveContains(searchText) }
+        }
+        return result.sorted { $0.createdAt > $1.createdAt }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Search bar
+            HStack {
+                Image(systemName: "magnifyingglass")
+                    .foregroundColor(.secondary)
+                TextField("Search \(collection)...", text: $searchText)
+                    .textFieldStyle(.plain)
+                if !searchText.isEmpty {
+                    Button(action: { searchText = "" }) {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(8)
+            .background(Color.primary.opacity(0.05))
+            .cornerRadius(8)
+            .padding()
+
+            Divider()
+
+            if items.isEmpty {
+                // Empty state
+                VStack(spacing: 16) {
+                    Spacer()
+                    Image(systemName: "photo.on.rectangle.angled")
+                        .font(.system(size: 64))
+                        .foregroundColor(.secondary.opacity(0.5))
+                    Text("No items in \(collection)")
+                        .font(.title2)
+                        .foregroundColor(.secondary)
+                    Text("Save screenshots or recordings to see them here")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                // Grid of items
+                ScrollView {
+                    LazyVGrid(columns: columns, spacing: 16) {
+                        ForEach(items) { item in
+                            LibraryItemCard(item: item, libraryService: libraryService, appState: appState)
+                        }
+                    }
+                    .padding(16)
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Library Item Card
+struct LibraryItemCard: View {
+    let item: LibraryItem
+    @ObservedObject var libraryService: LibraryService
+    @ObservedObject var appState: AppState
+
+    @State private var isHovered = false
+    @State private var thumbnail: NSImage?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            // Thumbnail
+            ZStack {
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color.gray.opacity(0.2))
+                    .aspectRatio(16/10, contentMode: .fit)
+
+                if let thumbnail = thumbnail {
+                    Image(nsImage: thumbnail)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .clipped()
+                        .cornerRadius(8)
+                } else {
+                    Image(systemName: iconForType)
+                        .font(.system(size: 32))
+                        .foregroundColor(.secondary)
+                }
+
+                if isHovered {
+                    Color.black.opacity(0.4)
+                        .cornerRadius(8)
+
+                    VStack(spacing: 8) {
+                        // Open in editor
+                        Button(action: openInEditor) {
+                            Label("Edit", systemImage: "pencil")
+                                .padding(8)
+                                .background(.ultraThinMaterial)
+                                .cornerRadius(6)
+                        }
+                        .buttonStyle(.plain)
+
+                        HStack(spacing: 8) {
+                            // Favorite
+                            Button(action: { libraryService.toggleFavorite(item) }) {
+                                Image(systemName: item.isFavorite ? "star.fill" : "star")
+                                    .foregroundColor(item.isFavorite ? .yellow : .white)
+                                    .padding(6)
+                                    .background(.ultraThinMaterial)
+                                    .clipShape(Circle())
+                            }
+                            .buttonStyle(.plain)
+
+                            // Open in Finder
+                            Button(action: openInFinder) {
+                                Image(systemName: "folder")
+                                    .padding(6)
+                                    .background(.ultraThinMaterial)
+                                    .clipShape(Circle())
+                            }
+                            .buttonStyle(.plain)
+
+                            // Delete
+                            Button(action: { libraryService.deleteItem(item) }) {
+                                Image(systemName: "trash")
+                                    .foregroundColor(.red)
+                                    .padding(6)
+                                    .background(.ultraThinMaterial)
+                                    .clipShape(Circle())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+            }
+            .onHover { hovering in
+                withAnimation(.easeInOut(duration: 0.15)) {
+                    isHovered = hovering
+                }
+            }
+            .onTapGesture(count: 2) {
+                openInEditor()
+            }
+
+            // Info
+            HStack(spacing: 4) {
+                if item.isFavorite {
+                    Image(systemName: "star.fill")
+                        .font(.caption2)
+                        .foregroundColor(.yellow)
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(item.name)
+                        .font(.caption)
+                        .lineLimit(1)
+                    Text(dateFormatted)
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+            }
+        }
+        .onAppear {
+            loadThumbnail()
+        }
+    }
+
+    private var iconForType: String {
+        switch item.type {
+        case .screenshot: return "photo"
+        case .recording: return "video"
+        case .gif: return "photo.stack"
+        case .voiceRecording: return "waveform"
+        }
+    }
+
+    private var dateFormatted: String {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter.string(from: item.createdAt)
+    }
+
+    private func loadThumbnail() {
+        if item.type == .screenshot {
+            thumbnail = libraryService.loadImage(for: item)
+        }
+    }
+
+    private func openInEditor() {
+        if item.type == .screenshot, let image = libraryService.loadImage(for: item) {
+            appState.currentImage = image
+            appState.annotations = []
+        } else {
+            // Open in default app
+            let url = libraryService.fileURL(for: item)
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    private func openInFinder() {
+        let url = libraryService.fileURL(for: item)
+        NSWorkspace.shared.selectFile(url.path, inFileViewerRootedAtPath: "")
     }
 }
 
