@@ -5,7 +5,16 @@ struct MainWindowView: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.openWindow) private var openWindow
     @StateObject private var captureService = ScreenCaptureService()
+    @StateObject private var recordingService = ScreenRecordingService.shared
     @State private var showWindowPicker = false
+    @State private var showNewProjectSheet = false
+    @State private var newProjectName = ""
+    @State private var customProjects: [String] = []
+
+    init() {
+        // Load saved projects
+        _customProjects = State(initialValue: UserDefaults.standard.stringArray(forKey: "customProjects") ?? [])
+    }
 
     var body: some View {
         NavigationSplitView {
@@ -29,6 +38,13 @@ struct MainWindowView: View {
                     }
                 }
 
+                Section("Recording") {
+                    SidebarRecordButton(title: "Record Region", icon: "rectangle.dashed.badge.record", mode: .region)
+                    SidebarRecordButton(title: "Record Window", icon: "macwindow.badge.plus", mode: .window)
+                    SidebarRecordButton(title: "Record Full Screen", icon: "rectangle.inset.filled.badge.record", mode: .fullScreen)
+                    SidebarRecordButton(title: "Voice Only", icon: "mic.fill", mode: .voiceOnly)
+                }
+
                 Section("Library") {
                     NavigationLink(value: "all") {
                         Label("All Images", systemImage: "photo.on.rectangle")
@@ -40,6 +56,29 @@ struct MainWindowView: View {
 
                     NavigationLink(value: "favorites") {
                         Label("Favorites", systemImage: "star")
+                    }
+                }
+
+                if !customProjects.isEmpty {
+                    Section("Projects") {
+                        ForEach(customProjects, id: \.self) { project in
+                            NavigationLink(value: project) {
+                                Label(project, systemImage: "folder")
+                            }
+                            .contextMenu {
+                                Button(role: .destructive) {
+                                    deleteProject(project)
+                                } label: {
+                                    Label("Delete", systemImage: "trash")
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Section {
+                    Button(action: { showNewProjectSheet = true }) {
+                        Label("New Project", systemImage: "plus.circle")
                     }
                 }
             }
@@ -75,6 +114,39 @@ struct MainWindowView: View {
                 captureSelectedWindow(selectedWindow)
             }
         }
+        .sheet(isPresented: $showNewProjectSheet) {
+            MainWindowNewProjectSheet(
+                projectName: $newProjectName,
+                onCreate: createNewProject,
+                onCancel: {
+                    newProjectName = ""
+                    showNewProjectSheet = false
+                }
+            )
+        }
+    }
+
+    // MARK: - Project Management
+
+    private func createNewProject() {
+        let name = newProjectName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+
+        if !customProjects.contains(name) {
+            customProjects.append(name)
+            saveProjects()
+        }
+        newProjectName = ""
+        showNewProjectSheet = false
+    }
+
+    private func deleteProject(_ name: String) {
+        customProjects.removeAll { $0 == name }
+        saveProjects()
+    }
+
+    private func saveProjects() {
+        UserDefaults.standard.set(customProjects, forKey: "customProjects")
     }
 
     // MARK: - Actions
@@ -252,6 +324,139 @@ struct QuickActionCard: View {
             withAnimation(.easeInOut(duration: 0.15)) {
                 isHovered = hovering
             }
+        }
+    }
+}
+
+// MARK: - Sidebar Record Button
+struct SidebarRecordButton: View {
+    let title: String
+    let icon: String
+    let mode: RecordingConfiguration.CaptureMode
+
+    @StateObject private var recordingService = ScreenRecordingService.shared
+
+    private var isThisModeRecording: Bool {
+        recordingService.state.isRecording && recordingService.configuration.captureMode == mode
+    }
+
+    var body: some View {
+        Button(action: handleTap) {
+            HStack {
+                Label(title, systemImage: icon)
+                    .foregroundColor(mode == .voiceOnly ? .blue : .red)
+
+                Spacer()
+
+                if isThisModeRecording {
+                    Text(formatTime(recordingService.elapsedTime))
+                        .font(.caption.monospacedDigit())
+                        .foregroundColor(.red)
+                }
+            }
+        }
+        .disabled(recordingService.state.isRecording && !isThisModeRecording)
+    }
+
+    private func handleTap() {
+        if isThisModeRecording {
+            // Stop recording
+            Task {
+                _ = try? await recordingService.stopRecording()
+            }
+        } else {
+            // Start recording
+            startRecording()
+        }
+    }
+
+    private func startRecording() {
+        recordingService.configuration.captureMode = mode
+
+        switch mode {
+        case .region:
+            Task { @MainActor in
+                print("🎬 Sidebar: Starting region selection...")
+                let selector = RecordingRegionSelector()
+                if let region = await selector.selectRegion() {
+                    print("🎬 Sidebar: Region selected: \(region)")
+                    recordingService.configuration.region = region
+                    do {
+                        try await recordingService.startRecording()
+                        print("🎬 Sidebar: Recording started!")
+                    } catch {
+                        print("❌ Sidebar: Failed to start recording: \(error)")
+                    }
+                }
+            }
+
+        case .window:
+            Task { @MainActor in
+                print("🎬 Sidebar: Starting window recording...")
+                do {
+                    try await recordingService.startRecording()
+                } catch {
+                    print("❌ Sidebar: Failed to start recording: \(error)")
+                }
+            }
+
+        case .fullScreen, .voiceOnly:
+            Task {
+                print("🎬 Sidebar: Starting \(mode.rawValue) recording...")
+                do {
+                    try await recordingService.startRecording()
+                } catch {
+                    print("❌ Sidebar: Failed to start recording: \(error)")
+                }
+            }
+        }
+    }
+
+    private func formatTime(_ time: TimeInterval) -> String {
+        let minutes = Int(time) / 60
+        let seconds = Int(time) % 60
+        return String(format: "%d:%02d", minutes, seconds)
+    }
+}
+
+// MARK: - Main Window New Project Sheet
+struct MainWindowNewProjectSheet: View {
+    @Binding var projectName: String
+    let onCreate: () -> Void
+    let onCancel: () -> Void
+    @FocusState private var isNameFocused: Bool
+
+    var body: some View {
+        VStack(spacing: 20) {
+            Text("New Project")
+                .font(.headline)
+
+            TextField("Project Name", text: $projectName)
+                .textFieldStyle(.roundedBorder)
+                .focused($isNameFocused)
+                .onSubmit {
+                    if !projectName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        onCreate()
+                    }
+                }
+
+            HStack(spacing: 12) {
+                Button("Cancel") {
+                    onCancel()
+                }
+                .keyboardShortcut(.cancelAction)
+
+                Button("Create") {
+                    onCreate()
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(projectName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(24)
+        .frame(width: 300)
+        .onAppear {
+            isNameFocused = true
         }
     }
 }

@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Instinctly - Shared Image</title>
+    <script src="https://cdn.apple-cloudkit.com/ck/2/cloudkit.min.js" async></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            color: #fff;
+        }
+
+        .container {
+            max-width: 1200px;
+            width: 90%;
+            padding: 20px;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+
+        .logo {
+            font-size: 28px;
+            font-weight: 700;
+            color: #fff;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+        }
+
+        .logo-icon {
+            width: 40px;
+            height: 40px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .image-container {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 16px;
+            padding: 20px;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            margin-bottom: 20px;
+        }
+
+        .shared-image {
+            max-width: 100%;
+            max-height: 70vh;
+            border-radius: 8px;
+            display: block;
+            margin: 0 auto;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+        }
+
+        .loading {
+            text-align: center;
+            padding: 60px;
+        }
+
+        .spinner {
+            width: 50px;
+            height: 50px;
+            border: 3px solid rgba(255, 255, 255, 0.1);
+            border-top-color: #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 20px;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .error {
+            text-align: center;
+            padding: 60px;
+            color: #ff6b6b;
+        }
+
+        .error-icon {
+            font-size: 48px;
+            margin-bottom: 20px;
+        }
+
+        .actions {
+            display: flex;
+            justify-content: center;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+
+        .btn {
+            padding: 12px 24px;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            border: none;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: #fff;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 30px rgba(102, 126, 234, 0.3);
+        }
+
+        .btn-secondary {
+            background: rgba(255, 255, 255, 0.1);
+            color: #fff;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+
+        .btn-secondary:hover {
+            background: rgba(255, 255, 255, 0.2);
+        }
+
+        .meta {
+            text-align: center;
+            color: rgba(255, 255, 255, 0.6);
+            font-size: 14px;
+            margin-top: 20px;
+        }
+
+        .footer {
+            margin-top: 40px;
+            text-align: center;
+            color: rgba(255, 255, 255, 0.4);
+            font-size: 12px;
+        }
+
+        .footer a {
+            color: #667eea;
+            text-decoration: none;
+        }
+
+        .footer a:hover {
+            text-decoration: underline;
+        }
+
+        .get-app {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 12px;
+            padding: 20px;
+            text-align: center;
+            margin-top: 20px;
+        }
+
+        .get-app h3 {
+            margin-bottom: 10px;
+            font-weight: 600;
+        }
+
+        .get-app p {
+            color: rgba(255, 255, 255, 0.6);
+            font-size: 14px;
+            margin-bottom: 15px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="logo">
+                <div class="logo-icon">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z" fill="white"/>
+                    </svg>
+                </div>
+                Instinctly
+            </div>
+        </div>
+
+        <div id="content">
+            <div class="loading">
+                <div class="spinner"></div>
+                <p>Loading shared image...</p>
+            </div>
+        </div>
+
+        <div class="footer">
+            <p>Shared via <a href="https://instinctly.app">Instinctly</a> - Screenshot & Screen Recording for macOS</p>
+        </div>
+    </div>
+
+    <script>
+        // Configuration - UPDATE THESE VALUES
+        const CLOUDKIT_CONFIG = {
+            containerIdentifier: 'iCloud.com.instinctly.app',
+            apiTokenAuth: {
+                // You'll need to generate this in CloudKit Dashboard
+                // Go to: CloudKit Dashboard > API Tokens > Create a new token
+                apiToken: '300fd65339c10574c9ee00ecd671a206e2f1bff39471036418f595d6e002ec86',
+                persist: true
+            },
+            environment: 'development' // Use 'development' until you deploy to production
+        };
+
+        // Get share ID from URL
+        function getShareId() {
+            const params = new URLSearchParams(window.location.search);
+            return params.get('id') || params.get('share');
+        }
+
+        // Initialize CloudKit
+        async function initCloudKit() {
+            return new Promise((resolve, reject) => {
+                CloudKit.configure({
+                    containers: [CLOUDKIT_CONFIG]
+                });
+
+                const container = CloudKit.getDefaultContainer();
+                const publicDB = container.publicCloudDatabase;
+
+                resolve(publicDB);
+            });
+        }
+
+        // Fetch shared image
+        async function fetchSharedImage(shareId) {
+            try {
+                const db = await initCloudKit();
+
+                const response = await db.fetchRecords([{
+                    recordName: shareId,
+                    recordType: 'SharedImage'
+                }]);
+
+                if (response.records && response.records.length > 0) {
+                    const record = response.records[0];
+                    return {
+                        title: record.fields.title?.value || 'Shared Image',
+                        imageAsset: record.fields.imageAsset?.value,
+                        createdAt: record.fields.createdAt?.value
+                    };
+                }
+
+                throw new Error('Image not found');
+            } catch (error) {
+                console.error('Error fetching image:', error);
+                throw error;
+            }
+        }
+
+        // Display image
+        function displayImage(data) {
+            const content = document.getElementById('content');
+
+            content.innerHTML = `
+                <div class="image-container">
+                    <img src="${data.imageAsset.downloadURL}" alt="${data.title}" class="shared-image" id="sharedImage">
+                </div>
+
+                <div class="actions">
+                    <button class="btn btn-primary" onclick="downloadImage()">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/>
+                        </svg>
+                        Download
+                    </button>
+                    <button class="btn btn-secondary" onclick="copyLink()">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/>
+                        </svg>
+                        Copy Link
+                    </button>
+                    <button class="btn btn-secondary" onclick="openInApp()">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M19 19H5V5h7V3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2v-7h-2v7zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7z"/>
+                        </svg>
+                        Open in App
+                    </button>
+                </div>
+
+                ${data.title ? `<div class="meta">Title: ${data.title}</div>` : ''}
+
+                <div class="get-app">
+                    <h3>Get Instinctly</h3>
+                    <p>Capture, annotate, and share screenshots with ease</p>
+                    <a href="https://instinctly.app" class="btn btn-primary">Download for macOS</a>
+                </div>
+            `;
+        }
+
+        // Display error
+        function displayError(message) {
+            const content = document.getElementById('content');
+            content.innerHTML = `
+                <div class="error">
+                    <div class="error-icon">😕</div>
+                    <h2>Unable to load image</h2>
+                    <p>${message}</p>
+                    <br>
+                    <a href="https://instinctly.app" class="btn btn-primary">Get Instinctly</a>
+                </div>
+            `;
+        }
+
+        // Download image
+        function downloadImage() {
+            const img = document.getElementById('sharedImage');
+            if (img) {
+                const link = document.createElement('a');
+                link.href = img.src;
+                link.download = 'instinctly-shared-image.png';
+                link.click();
+            }
+        }
+
+        // Copy link
+        function copyLink() {
+            navigator.clipboard.writeText(window.location.href).then(() => {
+                alert('Link copied to clipboard!');
+            });
+        }
+
+        // Open in app
+        function openInApp() {
+            const shareId = getShareId();
+            if (shareId) {
+                window.location.href = `instinctly://share/${shareId}`;
+            }
+        }
+
+        // Initialize
+        async function init() {
+            const shareId = getShareId();
+
+            if (!shareId) {
+                displayError('No share ID provided');
+                return;
+            }
+
+            // Check if API token is configured
+            if (CLOUDKIT_CONFIG.apiTokenAuth.apiToken === 'YOUR_API_TOKEN_HERE') {
+                displayError('CloudKit API token not configured. See setup instructions.');
+                return;
+            }
+
+            try {
+                const data = await fetchSharedImage(shareId);
+                displayImage(data);
+            } catch (error) {
+                displayError(error.message || 'Failed to load the shared image');
+            }
+        }
+
+        // Wait for CloudKit to load, then start
+        function waitForCloudKit() {
+            if (typeof CloudKit !== 'undefined') {
+                init();
+            } else {
+                // CloudKit not loaded yet, wait and retry
+                setTimeout(waitForCloudKit, 100);
+            }
+        }
+
+        // Start when DOM is ready
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', waitForCloudKit);
+        } else {
+            waitForCloudKit();
+        }
+    </script>
+</body>
+</html>

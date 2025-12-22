@@ -3,6 +3,7 @@ import SwiftUI
 struct CollectionsView: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.openWindow) private var openWindow
+    @StateObject private var libraryService = LibraryService.shared
 
     @State private var selectedCollection: String? = "All"
     @State private var searchText = ""
@@ -10,7 +11,6 @@ struct CollectionsView: View {
     @State private var sortOrder: SortOrder = .dateDescending
     @State private var showNewCollectionSheet = false
     @State private var newCollectionName = ""
-    @State private var customCollections: [String] = []
 
     enum ViewMode {
         case grid, list
@@ -24,9 +24,17 @@ struct CollectionsView: View {
     }
 
     // Built-in collections
-    private let builtInCollections = ["All", "Screenshots", "Favorites"]
-    private var allCollections: [String] { builtInCollections + customCollections }
-    private let images: [SavedImage] = [] // Will be populated from Core Data
+    private let builtInCollections = ["All", "Screenshots", "Recordings", "Favorites"]
+
+    // Custom collections from library service (excluding built-in ones)
+    private var customCollections: [String] {
+        libraryService.collections.filter { !builtInCollections.contains($0) }
+    }
+
+    // Items for current collection
+    private var currentItems: [LibraryItem] {
+        libraryService.items(in: selectedCollection ?? "All")
+    }
 
     var body: some View {
         NavigationSplitView {
@@ -78,13 +86,13 @@ struct CollectionsView: View {
                 Divider()
 
                 // Content
-                if images.isEmpty {
+                if filteredItems.isEmpty {
                     EmptyCollectionView(collectionName: selectedCollection ?? "All")
                 } else {
                     if viewMode == .grid {
-                        CollectionGridView(images: filteredImages)
+                        CollectionGridView(items: filteredItems, libraryService: libraryService)
                     } else {
-                        CollectionListView(images: filteredImages)
+                        CollectionListView(items: filteredItems, libraryService: libraryService)
                     }
                 }
             }
@@ -96,9 +104,6 @@ struct CollectionsView: View {
                     Label("New Capture", systemImage: "camera.viewfinder")
                 }
             }
-        }
-        .onAppear {
-            loadCollections()
         }
         .sheet(isPresented: $showNewCollectionSheet) {
             NewProjectSheet(
@@ -112,18 +117,34 @@ struct CollectionsView: View {
         }
     }
 
-    private var filteredImages: [SavedImage] {
-        images.filter { image in
-            if searchText.isEmpty { return true }
-            return image.name.localizedCaseInsensitiveContains(searchText)
+    private var filteredItems: [LibraryItem] {
+        var items = currentItems
+
+        // Filter by search text
+        if !searchText.isEmpty {
+            items = items.filter { $0.name.localizedCaseInsensitiveContains(searchText) }
         }
+
+        // Sort items
+        switch sortOrder {
+        case .dateDescending:
+            items.sort { $0.createdAt > $1.createdAt }
+        case .dateAscending:
+            items.sort { $0.createdAt < $1.createdAt }
+        case .nameAscending:
+            items.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        case .nameDescending:
+            items.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedDescending }
+        }
+
+        return items
     }
 
     private func iconForCollection(_ name: String) -> String {
         switch name {
         case "All": return "photo.on.rectangle"
         case "Screenshots": return "camera.viewfinder"
-        case "Annotations": return "pencil.tip.crop.circle"
+        case "Recordings": return "video"
         case "Favorites": return "star"
         default: return "folder"
         }
@@ -132,28 +153,17 @@ struct CollectionsView: View {
     private func createNewCollection() {
         guard !newCollectionName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         let name = newCollectionName.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !customCollections.contains(name) {
-            customCollections.append(name)
-            saveCollections()
-        }
+        libraryService.addCollection(name)
         newCollectionName = ""
         showNewCollectionSheet = false
+        selectedCollection = name
     }
 
     private func deleteCollection(_ name: String) {
-        customCollections.removeAll { $0 == name }
-        saveCollections()
+        libraryService.removeCollection(name)
         if selectedCollection == name {
             selectedCollection = "All"
         }
-    }
-
-    private func saveCollections() {
-        UserDefaults.standard.set(customCollections, forKey: "customCollections")
-    }
-
-    private func loadCollections() {
-        customCollections = UserDefaults.standard.stringArray(forKey: "customCollections") ?? []
     }
 
     private func captureNew() {
@@ -263,15 +273,16 @@ struct EmptyCollectionView: View {
 
 // MARK: - Collection Grid View
 struct CollectionGridView: View {
-    let images: [SavedImage]
+    let items: [LibraryItem]
+    let libraryService: LibraryService
 
     private let columns = [GridItem(.adaptive(minimum: 150, maximum: 200), spacing: 16)]
 
     var body: some View {
         ScrollView {
             LazyVGrid(columns: columns, spacing: 16) {
-                ForEach(images) { image in
-                    ImageThumbnailView(image: image)
+                ForEach(items) { item in
+                    LibraryItemThumbnailView(item: item, libraryService: libraryService)
                 }
             }
             .padding(16)
@@ -281,20 +292,23 @@ struct CollectionGridView: View {
 
 // MARK: - Collection List View
 struct CollectionListView: View {
-    let images: [SavedImage]
+    let items: [LibraryItem]
+    let libraryService: LibraryService
 
     var body: some View {
-        List(images) { image in
-            ImageListRowView(image: image)
+        List(items) { item in
+            LibraryItemListRowView(item: item, libraryService: libraryService)
         }
     }
 }
 
-// MARK: - Image Thumbnail View
-struct ImageThumbnailView: View {
-    let image: SavedImage
+// MARK: - Library Item Thumbnail View
+struct LibraryItemThumbnailView: View {
+    let item: LibraryItem
+    let libraryService: LibraryService
 
     @State private var isHovered = false
+    @State private var thumbnail: NSImage?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -304,12 +318,17 @@ struct ImageThumbnailView: View {
                     .fill(Color.gray.opacity(0.2))
                     .aspectRatio(16/10, contentMode: .fit)
 
-                if let thumbnail = image.thumbnail {
+                if let thumbnail = thumbnail {
                     Image(nsImage: thumbnail)
                         .resizable()
                         .aspectRatio(contentMode: .fill)
                         .clipped()
                         .cornerRadius(8)
+                } else {
+                    // Show icon based on type
+                    Image(systemName: iconForType)
+                        .font(.system(size: 32))
+                        .foregroundColor(.secondary)
                 }
 
                 if isHovered {
@@ -317,24 +336,29 @@ struct ImageThumbnailView: View {
                         .cornerRadius(8)
 
                     HStack(spacing: 8) {
-                        Button(action: {}) {
-                            Image(systemName: "pencil")
+                        // Favorite
+                        Button(action: { libraryService.toggleFavorite(item) }) {
+                            Image(systemName: item.isFavorite ? "star.fill" : "star")
+                                .foregroundColor(item.isFavorite ? .yellow : .white)
                                 .padding(8)
                                 .background(.ultraThinMaterial)
                                 .clipShape(Circle())
                         }
                         .buttonStyle(.plain)
 
-                        Button(action: {}) {
-                            Image(systemName: "square.and.arrow.up")
+                        // Open/Edit
+                        Button(action: { openItem() }) {
+                            Image(systemName: "arrow.up.right.square")
                                 .padding(8)
                                 .background(.ultraThinMaterial)
                                 .clipShape(Circle())
                         }
                         .buttonStyle(.plain)
 
-                        Button(action: {}) {
+                        // Delete
+                        Button(action: { libraryService.deleteItem(item) }) {
                             Image(systemName: "trash")
+                                .foregroundColor(.red)
                                 .padding(8)
                                 .background(.ultraThinMaterial)
                                 .clipShape(Circle())
@@ -350,27 +374,67 @@ struct ImageThumbnailView: View {
             }
 
             // Info
-            VStack(alignment: .leading, spacing: 2) {
-                Text(image.name)
-                    .font(.caption)
-                    .lineLimit(1)
+            HStack(spacing: 4) {
+                if item.isFavorite {
+                    Image(systemName: "star.fill")
+                        .font(.caption2)
+                        .foregroundColor(.yellow)
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(item.name)
+                        .font(.caption)
+                        .lineLimit(1)
 
-                Text(image.dateFormatted)
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
+                    Text(dateFormatted)
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
             }
         }
+        .onAppear {
+            loadThumbnail()
+        }
+    }
+
+    private var iconForType: String {
+        switch item.type {
+        case .screenshot: return "photo"
+        case .recording: return "video"
+        case .gif: return "photo.stack"
+        case .voiceRecording: return "waveform"
+        }
+    }
+
+    private var dateFormatted: String {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter.string(from: item.createdAt)
+    }
+
+    private func loadThumbnail() {
+        if item.type == .screenshot {
+            thumbnail = libraryService.loadImage(for: item)
+        }
+    }
+
+    private func openItem() {
+        let url = libraryService.fileURL(for: item)
+        NSWorkspace.shared.open(url)
     }
 }
 
-// MARK: - Image List Row View
-struct ImageListRowView: View {
-    let image: SavedImage
+// MARK: - Library Item List Row View
+struct LibraryItemListRowView: View {
+    let item: LibraryItem
+    let libraryService: LibraryService
+
+    @State private var thumbnail: NSImage?
 
     var body: some View {
         HStack(spacing: 12) {
             // Thumbnail
-            if let thumbnail = image.thumbnail {
+            if let thumbnail = thumbnail {
                 Image(nsImage: thumbnail)
                     .resizable()
                     .aspectRatio(contentMode: .fill)
@@ -381,46 +445,90 @@ struct ImageListRowView: View {
                 RoundedRectangle(cornerRadius: 4)
                     .fill(Color.gray.opacity(0.2))
                     .frame(width: 60, height: 40)
+                    .overlay {
+                        Image(systemName: iconForType)
+                            .foregroundColor(.secondary)
+                    }
             }
 
             // Info
             VStack(alignment: .leading, spacing: 2) {
-                Text(image.name)
-                    .font(.body)
+                HStack(spacing: 4) {
+                    if item.isFavorite {
+                        Image(systemName: "star.fill")
+                            .font(.caption)
+                            .foregroundColor(.yellow)
+                    }
+                    Text(item.name)
+                        .font(.body)
+                }
 
-                Text(image.dateFormatted)
+                Text(dateFormatted)
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
 
             Spacer()
 
-            // Size
-            Text(image.sizeFormatted)
-                .font(.caption)
-                .foregroundColor(.secondary)
+            // Type badge
+            Text(item.type.rawValue.capitalized)
+                .font(.caption2)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color.secondary.opacity(0.2))
+                .cornerRadius(4)
+
+            // Actions
+            HStack(spacing: 4) {
+                Button(action: { libraryService.toggleFavorite(item) }) {
+                    Image(systemName: item.isFavorite ? "star.fill" : "star")
+                        .foregroundColor(item.isFavorite ? .yellow : .secondary)
+                }
+                .buttonStyle(.borderless)
+
+                Button(action: { openItem() }) {
+                    Image(systemName: "arrow.up.right.square")
+                }
+                .buttonStyle(.borderless)
+
+                Button(action: { libraryService.deleteItem(item) }) {
+                    Image(systemName: "trash")
+                        .foregroundColor(.red)
+                }
+                .buttonStyle(.borderless)
+            }
         }
         .padding(.vertical, 4)
+        .onAppear {
+            loadThumbnail()
+        }
     }
-}
 
-// MARK: - Saved Image Model (Placeholder)
-struct SavedImage: Identifiable {
-    let id: UUID
-    let name: String
-    let date: Date
-    let thumbnail: NSImage?
-    let size: Int64
+    private var iconForType: String {
+        switch item.type {
+        case .screenshot: return "photo"
+        case .recording: return "video"
+        case .gif: return "photo.stack"
+        case .voiceRecording: return "waveform"
+        }
+    }
 
-    var dateFormatted: String {
+    private var dateFormatted: String {
         let formatter = DateFormatter()
         formatter.dateStyle = .medium
         formatter.timeStyle = .short
-        return formatter.string(from: date)
+        return formatter.string(from: item.createdAt)
     }
 
-    var sizeFormatted: String {
-        ByteCountFormatter.string(fromByteCount: size, countStyle: .file)
+    private func loadThumbnail() {
+        if item.type == .screenshot {
+            thumbnail = libraryService.loadImage(for: item)
+        }
+    }
+
+    private func openItem() {
+        let url = libraryService.fileURL(for: item)
+        NSWorkspace.shared.open(url)
     }
 }
 
@@ -429,6 +537,7 @@ struct NewProjectSheet: View {
     @Binding var projectName: String
     let onCreate: () -> Void
     let onCancel: () -> Void
+    @FocusState private var isNameFocused: Bool
 
     var body: some View {
         VStack(spacing: 20) {
@@ -438,18 +547,28 @@ struct NewProjectSheet: View {
             TextField("Project name", text: $projectName)
                 .textFieldStyle(.roundedBorder)
                 .frame(width: 250)
+                .focused($isNameFocused)
+                .onSubmit(onCreate)
 
             HStack(spacing: 12) {
                 Button("Cancel", action: onCancel)
                     .buttonStyle(.bordered)
+                    .keyboardShortcut(.escape)
 
                 Button("Create", action: onCreate)
                     .buttonStyle(.borderedProminent)
                     .disabled(projectName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .keyboardShortcut(.return)
             }
         }
         .padding(24)
         .frame(width: 320)
+        .onAppear {
+            // Focus the text field when sheet appears
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                isNameFocused = true
+            }
+        }
     }
 }
 

@@ -64,9 +64,31 @@ struct MenuBarView: View {
 
             // Recording Section
             VStack(spacing: 2) {
-                RecordMenuButton()
+                RecordingMenuButton(
+                    title: "Record Region",
+                    icon: "rectangle.dashed.badge.record",
+                    mode: .region
+                )
+
+                RecordingMenuButton(
+                    title: "Record Window",
+                    icon: "macwindow.badge.plus",
+                    mode: .window
+                )
+
+                RecordingMenuButton(
+                    title: "Record Full Screen",
+                    icon: "rectangle.on.rectangle",
+                    mode: .fullScreen
+                )
+
+                RecordingMenuButton(
+                    title: "Voice Only",
+                    icon: "mic.fill",
+                    mode: .voiceOnly
+                )
             }
-            .padding(.vertical, 4)
+            .padding(.vertical, 8)
 
             Divider()
 
@@ -260,7 +282,109 @@ struct RecentCaptureRow: View {
     }
 }
 
-// MARK: - Record Menu Button
+// MARK: - Recording Menu Button (direct recording)
+struct RecordingMenuButton: View {
+    let title: String
+    let icon: String
+    let mode: RecordingConfiguration.CaptureMode
+
+    @StateObject private var recordingService = ScreenRecordingService.shared
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: startRecording) {
+            HStack(spacing: 12) {
+                Image(systemName: icon)
+                    .frame(width: 20)
+                    .foregroundColor(mode == .voiceOnly ? .blue : .red)
+
+                Text(title)
+                    .foregroundColor(.primary)
+
+                Spacer()
+
+                if recordingService.state.isRecording && recordingService.configuration.captureMode == mode {
+                    Text(formatTime(recordingService.elapsedTime))
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundColor(.red)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            .background(isHovered ? Color.primary.opacity(0.1) : Color.clear)
+            .cornerRadius(6)
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+        .padding(.horizontal, 8)
+        .disabled(recordingService.state.isRecording && recordingService.configuration.captureMode != mode)
+    }
+
+    private func startRecording() {
+        // If already recording this mode, stop it
+        if recordingService.state.isRecording {
+            Task {
+                _ = try? await recordingService.stopRecording()
+            }
+            return
+        }
+
+        // Set mode and start
+        recordingService.configuration.captureMode = mode
+
+        switch mode {
+        case .region:
+            // Need to select region first
+            Task { @MainActor in
+                print("🎬 MenuBar: Starting region selection...")
+                let selector = RecordingRegionSelector()
+                if let region = await selector.selectRegion() {
+                    print("🎬 MenuBar: Region selected: \(region)")
+                    recordingService.configuration.region = region
+                    do {
+                        try await recordingService.startRecording()
+                        print("🎬 MenuBar: Recording started!")
+                    } catch {
+                        print("❌ MenuBar: Failed to start recording: \(error)")
+                    }
+                } else {
+                    print("⚠️ MenuBar: Region selection cancelled")
+                }
+            }
+
+        case .window:
+            // Need to select window first - show window picker
+            Task { @MainActor in
+                print("🎬 MenuBar: Starting window recording...")
+                do {
+                    try await recordingService.startRecording()
+                    print("🎬 MenuBar: Recording started!")
+                } catch {
+                    print("❌ MenuBar: Failed to start recording: \(error)")
+                }
+            }
+
+        case .fullScreen, .voiceOnly:
+            Task {
+                print("🎬 MenuBar: Starting \(mode.rawValue) recording...")
+                do {
+                    try await recordingService.startRecording()
+                    print("🎬 MenuBar: Recording started!")
+                } catch {
+                    print("❌ MenuBar: Failed to start recording: \(error)")
+                }
+            }
+        }
+    }
+
+    private func formatTime(_ time: TimeInterval) -> String {
+        let minutes = Int(time) / 60
+        let seconds = Int(time) % 60
+        return String(format: "%d:%02d", minutes, seconds)
+    }
+}
+
+// MARK: - Record Menu Button (legacy popover - keeping for reference)
 struct RecordMenuButton: View {
     @StateObject private var recordingService = ScreenRecordingService.shared
     @State private var showRecordingPanel = false

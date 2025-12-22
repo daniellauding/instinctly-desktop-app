@@ -1,6 +1,7 @@
 import SwiftUI
 import AVFoundation
 import ScreenCaptureKit
+import os.log
 
 // MARK: - Recording Controls View (Floating Panel)
 struct RecordingControlsView: View {
@@ -55,8 +56,15 @@ struct RecordingControlsView: View {
                 switch recordingService.state {
                 case .idle:
                     RecordingSetupView(configuration: $recordingService.configuration) {
+                        print("🎬 RecordingControlsView: onStart closure called!")
                         Task {
-                            try? await recordingService.startRecording()
+                            print("🎬 RecordingControlsView: Starting recording task...")
+                            do {
+                                try await recordingService.startRecording()
+                                print("🎬 RecordingControlsView: Recording started successfully!")
+                            } catch {
+                                print("❌ RecordingControlsView: Failed to start recording: \(error)")
+                            }
                         }
                     }
 
@@ -596,9 +604,17 @@ struct RecordingSetupView: View {
     private func selectRegionForRecording() {
         // Use the existing RegionSelectionOverlay but for recording
         Task { @MainActor in
+            print("🎬 RecordingSetupView: Starting region selection...")
             let selector = RecordingRegionSelector()
             if let region = await selector.selectRegion() {
+                print("🎬 RecordingSetupView: Region selected: \(region)")
                 configuration.region = region
+                // AUTO-START: Begin recording immediately after region selection
+                print("🎬 RecordingSetupView: Calling onStart()...")
+                onStart()
+                print("🎬 RecordingSetupView: onStart() called!")
+            } else {
+                print("⚠️ RecordingSetupView: Region selection cancelled")
             }
         }
     }
@@ -788,178 +804,379 @@ struct WindowRowView: View {
 }
 
 // MARK: - Recording Region Selector
+private let recordingRegionLogger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "Instinctly", category: "RecordingRegionSelection")
+
 @MainActor
 class RecordingRegionSelector {
+    // CRITICAL: Keep strong reference to controller to prevent deallocation
+    private var activeController: RecordingRegionSelectionController?
+
     func selectRegion() async -> CGRect? {
-        await withCheckedContinuation { continuation in
-            let window = RegionSelectionWindowForRecording { rect in
+        recordingRegionLogger.info("🎬 Starting recording region selection")
+
+        return await withCheckedContinuation { continuation in
+            var hasResumed = false
+
+            let controller = RecordingRegionSelectionController { [weak self] rect in
+                guard !hasResumed else {
+                    recordingRegionLogger.warning("⚠️ Continuation already resumed, ignoring")
+                    return
+                }
+                hasResumed = true
+                recordingRegionLogger.info("✅ Region selection complete: \(rect?.debugDescription ?? "cancelled")")
+                // Clear reference after completion
+                self?.activeController = nil
                 continuation.resume(returning: rect)
             }
-            window.makeKeyAndOrderFront(nil)
+
+            // CRITICAL: Store strong reference to prevent deallocation
+            self.activeController = controller
+            controller.show()
         }
     }
 }
 
-// MARK: - Region Selection Window for Recording
-class RegionSelectionWindowForRecording: NSWindow {
-    private var selectionView: RegionSelectionViewForRecording!
+// MARK: - Recording Region Selection Controller (robust version)
+@MainActor
+class RecordingRegionSelectionController: NSWindowController {
     private var onComplete: ((CGRect?) -> Void)?
+    private var hasClosed = false
+    private var safetyTimer: Timer?
+    private var eventMonitor: Any?
 
-    init(onComplete: @escaping (CGRect?) -> Void) {
-        self.onComplete = onComplete
+    convenience init(onComplete: @escaping (CGRect?) -> Void) {
+        recordingRegionLogger.info("🎯 Initializing RecordingRegionSelectionController")
 
         guard let screen = NSScreen.main else {
-            onComplete(nil)
-            super.init(contentRect: .zero, styleMask: [], backing: .buffered, defer: false)
+            recordingRegionLogger.error("❌ No main screen available")
+            DispatchQueue.main.async { onComplete(nil) }
+            self.init(window: nil)
             return
         }
 
-        super.init(
+        recordingRegionLogger.info("📐 Screen frame: \(screen.frame.debugDescription)")
+
+        let window = RecordingRegionSelectionWindow(
             contentRect: screen.frame,
             styleMask: [.borderless],
             backing: .buffered,
             defer: false
         )
 
-        self.level = NSWindow.Level(rawValue: Int(CGShieldingWindowLevel()) + 1)
-        self.isOpaque = false
-        self.backgroundColor = .clear
-        self.ignoresMouseEvents = false
-        self.acceptsMouseMovedEvents = true
-        self.hasShadow = false
+        // CRITICAL: Use high window level but with safety mechanisms
+        window.level = NSWindow.Level(rawValue: Int(CGShieldingWindowLevel()) + 1)
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.ignoresMouseEvents = false
+        window.acceptsMouseMovedEvents = true
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        window.hasShadow = false
 
-        selectionView = RegionSelectionViewForRecording(frame: screen.frame) { [weak self] rect in
-            self?.close()
-            self?.onComplete?(rect)
+        recordingRegionLogger.info("✅ Window created with level: \(window.level.rawValue)")
+
+        self.init(window: window)
+        self.onComplete = onComplete
+
+        let contentView = RecordingRegionSelectionNSView(
+            frame: screen.frame,
+            onConfirm: { [weak self] rect in
+                recordingRegionLogger.info("✅ Selection confirmed: \(rect.debugDescription)")
+                if let strongSelf = self {
+                    recordingRegionLogger.info("📞 Calling handleComplete with rect...")
+                    strongSelf.handleComplete(rect)
+                } else {
+                    recordingRegionLogger.error("❌ CRITICAL: self is nil in onConfirm callback!")
+                }
+            },
+            onCancel: { [weak self] in
+                recordingRegionLogger.info("❌ Selection cancelled by user")
+                if let strongSelf = self {
+                    strongSelf.handleComplete(nil)
+                } else {
+                    recordingRegionLogger.error("❌ CRITICAL: self is nil in onCancel callback!")
+                }
+            }
+        )
+
+        window.contentView = contentView
+        window.setFrame(screen.frame, display: true)
+
+        // CRITICAL: Safety timeout - auto-cancel after 60 seconds to prevent system freeze
+        safetyTimer = Timer.scheduledTimer(withTimeInterval: 60.0, repeats: false) { [weak self] timer in
+            recordingRegionLogger.warning("⚠️ Safety timeout triggered - cancelling selection to prevent freeze")
+            guard let controller = self else { return }
+            Task { @MainActor in
+                controller.handleComplete(nil)
+            }
         }
-        self.contentView = selectionView
+
+        // Global ESC key monitor (more reliable than keyDown override)
+        eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
+            if event.keyCode == 53 { // ESC
+                recordingRegionLogger.info("⌨️ ESC pressed - cancelling")
+                self?.handleComplete(nil)
+                return nil
+            }
+            return event
+        }
+
+        recordingRegionLogger.info("✅ RecordingRegionSelectionController initialized with safety mechanisms")
     }
 
+    func show() {
+        recordingRegionLogger.info("📺 Showing recording region selection window")
+        showWindow(nil)
+
+        guard let window = window else {
+            recordingRegionLogger.error("❌ Window is nil in show()")
+            handleComplete(nil)
+            return
+        }
+
+        // Ensure window is visible and accepts input
+        window.orderFrontRegardless()
+        window.makeKey()
+        window.makeMain()
+
+        // Force app to front
+        NSApp.activate(ignoringOtherApps: true)
+
+        recordingRegionLogger.info("✅ Window shown and activated")
+    }
+
+    private func handleComplete(_ rect: CGRect?) {
+        guard !hasClosed else {
+            recordingRegionLogger.warning("⚠️ handleComplete called but already closed")
+            return
+        }
+        hasClosed = true
+
+        // Cleanup
+        safetyTimer?.invalidate()
+        safetyTimer = nil
+
+        if let monitor = eventMonitor {
+            NSEvent.removeMonitor(monitor)
+            eventMonitor = nil
+        }
+
+        recordingRegionLogger.info("🎬 Closing window and calling completion")
+
+        // Close window first (orderOut then close)
+        window?.orderOut(nil)
+        close()
+
+        // Call callback on main thread to ensure safe state
+        let completion = onComplete
+        onComplete = nil // Prevent double-call
+
+        DispatchQueue.main.async {
+            completion?(rect)
+        }
+    }
+
+    deinit {
+        // Cleanup resources - logging skipped due to MainActor isolation
+        safetyTimer?.invalidate()
+        if let monitor = eventMonitor {
+            NSEvent.removeMonitor(monitor)
+        }
+    }
+}
+
+// MARK: - Custom Window that can become key/main
+private class RecordingRegionSelectionWindow: NSWindow {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
 }
 
-// MARK: - Region Selection View for Recording
-class RegionSelectionViewForRecording: NSView {
-    private var startPoint: NSPoint?
-    private var currentPoint: NSPoint?
-    private var onComplete: ((CGRect?) -> Void)?
+// MARK: - Region Selection View for Recording (robust version)
+class RecordingRegionSelectionNSView: NSView {
+    private var startPoint: CGPoint?
+    private var currentPoint: CGPoint?
+    private var isDragging = false
+    private var onConfirm: ((CGRect) -> Void)?
+    private var onCancel: (() -> Void)?
+    private var trackingArea: NSTrackingArea?
 
-    init(frame: NSRect, onComplete: @escaping (CGRect?) -> Void) {
-        self.onComplete = onComplete
-        super.init(frame: frame)
-        addTrackingArea(NSTrackingArea(
-            rect: bounds,
-            options: [.activeAlways, .mouseMoved, .mouseEnteredAndExited],
-            owner: self,
-            userInfo: nil
-        ))
-    }
-
-    required init?(coder: NSCoder) { fatalError() }
-
-    override func draw(_ dirtyRect: NSRect) {
-        // Semi-transparent overlay
-        NSColor.black.withAlphaComponent(0.3).setFill()
-        dirtyRect.fill()
-
-        // Selection rectangle
-        if let start = startPoint, let current = currentPoint {
-            let rect = NSRect(
-                x: min(start.x, current.x),
-                y: min(start.y, current.y),
-                width: abs(current.x - start.x),
-                height: abs(current.y - start.y)
-            )
-
-            // Clear the selection area
-            NSColor.clear.setFill()
-            rect.fill()
-
-            // Draw border
-            NSColor.systemBlue.setStroke()
-            let path = NSBezierPath(rect: rect)
-            path.lineWidth = 2
-            path.stroke()
-
-            // Draw size label
-            let sizeText = "\(Int(rect.width)) × \(Int(rect.height))"
-            let attrs: [NSAttributedString.Key: Any] = [
-                .font: NSFont.systemFont(ofSize: 12, weight: .medium),
-                .foregroundColor: NSColor.white,
-                .backgroundColor: NSColor.black.withAlphaComponent(0.7)
-            ]
-            let textSize = sizeText.size(withAttributes: attrs)
-            let textRect = NSRect(
-                x: rect.midX - textSize.width / 2,
-                y: rect.maxY + 8,
-                width: textSize.width + 8,
-                height: textSize.height + 4
-            )
-            NSColor.black.withAlphaComponent(0.7).setFill()
-            NSBezierPath(roundedRect: textRect, xRadius: 4, yRadius: 4).fill()
-            sizeText.draw(at: NSPoint(x: textRect.minX + 4, y: textRect.minY + 2), withAttributes: attrs)
-        }
-
-        // Instructions
-        let instructions = "Drag to select recording region • Press Esc to cancel"
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 14),
-            .foregroundColor: NSColor.white
-        ]
-        let textSize = instructions.size(withAttributes: attrs)
-        instructions.draw(at: NSPoint(x: bounds.midX - textSize.width / 2, y: bounds.maxY - 50), withAttributes: attrs)
-    }
-
-    override func mouseDown(with event: NSEvent) {
-        startPoint = convert(event.locationInWindow, from: nil)
-        currentPoint = startPoint
-        needsDisplay = true
-    }
-
-    override func mouseDragged(with event: NSEvent) {
-        currentPoint = convert(event.locationInWindow, from: nil)
-        needsDisplay = true
-    }
-
-    override func mouseUp(with event: NSEvent) {
-        guard let start = startPoint, let current = currentPoint else {
-            onComplete?(nil)
-            return
-        }
-
-        let rect = CGRect(
+    var selectionRect: CGRect? {
+        guard let start = startPoint, let current = currentPoint else { return nil }
+        return CGRect(
             x: min(start.x, current.x),
             y: min(start.y, current.y),
             width: abs(current.x - start.x),
             height: abs(current.y - start.y)
         )
-
-        if rect.width > 10 && rect.height > 10 {
-            // Convert to screen coordinates (flip Y)
-            if let screen = NSScreen.main {
-                let screenRect = CGRect(
-                    x: rect.origin.x,
-                    y: screen.frame.height - rect.origin.y - rect.height,
-                    width: rect.width,
-                    height: rect.height
-                )
-                onComplete?(screenRect)
-            } else {
-                onComplete?(rect)
-            }
-        } else {
-            onComplete?(nil)
-        }
     }
 
-    override func keyDown(with event: NSEvent) {
-        if event.keyCode == 53 { // Escape
-            onComplete?(nil)
+    init(frame: NSRect, onConfirm: @escaping (CGRect) -> Void, onCancel: @escaping () -> Void) {
+        self.onConfirm = onConfirm
+        self.onCancel = onCancel
+        super.init(frame: frame)
+
+        recordingRegionLogger.info("🎨 RecordingRegionSelectionNSView initialized")
+        setupTrackingArea()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    private func setupTrackingArea() {
+        trackingArea = NSTrackingArea(
+            rect: bounds,
+            options: [.activeAlways, .mouseMoved, .mouseEnteredAndExited],
+            owner: self,
+            userInfo: nil
+        )
+        if let area = trackingArea {
+            addTrackingArea(area)
         }
     }
 
     override var acceptsFirstResponder: Bool { true }
+
+    override func becomeFirstResponder() -> Bool {
+        recordingRegionLogger.info("🎯 View became first responder")
+        return true
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        window?.makeFirstResponder(self)
+        recordingRegionLogger.info("📺 View moved to window, became first responder")
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+
+        guard let context = NSGraphicsContext.current?.cgContext else {
+            recordingRegionLogger.error("❌ No graphics context available")
+            return
+        }
+
+        let bounds = self.bounds
+
+        // Draw semi-transparent overlay
+        NSColor.black.withAlphaComponent(0.3).setFill()
+        bounds.fill()
+
+        // Draw selection rectangle if dragging
+        if let rect = selectionRect {
+            // Clear the selection area
+            context.setBlendMode(.clear)
+            context.fill(rect)
+            context.setBlendMode(.normal)
+
+            // Draw border
+            NSColor.systemBlue.setStroke()
+            let borderPath = NSBezierPath(rect: rect)
+            borderPath.lineWidth = 2
+            borderPath.stroke()
+
+            // Draw size label
+            let sizeText = "\(Int(rect.width)) × \(Int(rect.height))"
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .medium),
+                .foregroundColor: NSColor.white
+            ]
+            let textSize = sizeText.size(withAttributes: attrs)
+            let textRect = NSRect(
+                x: rect.midX - textSize.width / 2 - 8,
+                y: rect.maxY + 8,
+                width: textSize.width + 16,
+                height: textSize.height + 8
+            )
+
+            NSColor.black.withAlphaComponent(0.7).setFill()
+            NSBezierPath(roundedRect: textRect, xRadius: 4, yRadius: 4).fill()
+            sizeText.draw(at: NSPoint(x: textRect.minX + 8, y: textRect.minY + 4), withAttributes: attrs)
+        }
+
+        // Draw instructions if not dragging
+        if !isDragging && selectionRect == nil {
+            drawInstructions(in: bounds)
+        }
+    }
+
+    private func drawInstructions(in bounds: CGRect) {
+        let text = "Drag to select recording region • ESC to cancel"
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 16, weight: .medium),
+            .foregroundColor: NSColor.white
+        ]
+        let textSize = text.size(withAttributes: attrs)
+        let textRect = CGRect(
+            x: bounds.midX - textSize.width / 2 - 20,
+            y: bounds.midY - textSize.height / 2 - 10,
+            width: textSize.width + 40,
+            height: textSize.height + 20
+        )
+
+        NSColor.black.withAlphaComponent(0.6).setFill()
+        NSBezierPath(roundedRect: textRect, xRadius: 10, yRadius: 10).fill()
+
+        let textPoint = CGPoint(x: textRect.origin.x + 20, y: textRect.origin.y + 10)
+        text.draw(at: textPoint, withAttributes: attrs)
+    }
+
+    // MARK: - Mouse Events
+
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        recordingRegionLogger.info("🖱️ mouseDown at: \(point.debugDescription)")
+
+        startPoint = point
+        currentPoint = point
+        isDragging = true
+        needsDisplay = true
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        currentPoint = point
+        needsDisplay = true
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        recordingRegionLogger.info("🖱️ mouseUp at: \(point.debugDescription)")
+
+        currentPoint = point
+        isDragging = false
+
+        // AUTO-CAPTURE: Immediately confirm when mouse is released
+        if let rect = selectionRect, rect.width > 10 && rect.height > 10 {
+            recordingRegionLogger.info("✅ Valid selection, auto-capturing: \(rect.debugDescription)")
+
+            // Convert to screen coordinates (flip Y since NSView has origin at bottom-left)
+            let flippedRect = CGRect(
+                x: rect.origin.x,
+                y: bounds.height - rect.origin.y - rect.height,
+                width: rect.width,
+                height: rect.height
+            )
+
+            onConfirm?(flippedRect)
+        } else {
+            recordingRegionLogger.info("⚠️ Selection too small, resetting")
+            startPoint = nil
+            currentPoint = nil
+            needsDisplay = true
+        }
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+        recordingRegionLogger.info("🖱️ Right-click - cancelling")
+        onCancel?()
+    }
+
+    deinit {
+        if let area = trackingArea {
+            removeTrackingArea(area)
+        }
+        recordingRegionLogger.info("🗑️ RecordingRegionSelectionNSView deallocated")
+    }
 }
 
 // MARK: - Recording Active View
@@ -1085,6 +1302,169 @@ struct QuickRecordButton: View {
         } else {
             showControls = true
         }
+    }
+}
+
+// MARK: - Floating Recording Panel (stays visible during recording)
+@MainActor
+class FloatingRecordingPanelController: NSWindowController {
+    static let shared = FloatingRecordingPanelController()
+
+    private init() {
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 320, height: 60),
+            styleMask: [.nonactivatingPanel, .titled, .closable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+
+        panel.title = "Recording"
+        panel.titlebarAppearsTransparent = true
+        panel.isFloatingPanel = true
+        panel.level = .floating
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.isMovableByWindowBackground = true
+        panel.hidesOnDeactivate = false // CRITICAL: Stay visible when app loses focus
+        panel.becomesKeyOnlyIfNeeded = true
+        panel.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.95)
+
+        super.init(window: panel)
+
+        let hostingView = NSHostingView(rootView: FloatingRecordingControlsView(controller: self))
+        panel.contentView = hostingView
+
+        // Position at top-center of screen
+        if let screen = NSScreen.main {
+            let x = screen.visibleFrame.midX - 160
+            let y = screen.visibleFrame.maxY - 80
+            panel.setFrameOrigin(NSPoint(x: x, y: y))
+        }
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func showPanel() {
+        window?.orderFront(nil)
+    }
+
+    func hidePanel() {
+        window?.orderOut(nil)
+    }
+}
+
+// MARK: - Floating Recording Controls View (compact version)
+struct FloatingRecordingControlsView: View {
+    let controller: FloatingRecordingPanelController
+    @ObservedObject private var recordingService = ScreenRecordingService.shared
+    @State private var isSaving = false
+    @State private var pulseOpacity: Double = 1.0
+
+    var body: some View {
+        HStack(spacing: 12) {
+            // Recording indicator with pulse animation
+            Circle()
+                .fill(Color.red)
+                .frame(width: 14, height: 14)
+                .opacity(recordingService.state.isPaused ? 0.4 : pulseOpacity)
+                .animation(
+                    recordingService.state.isRecording
+                        ? .easeInOut(duration: 0.8).repeatForever(autoreverses: true)
+                        : .default,
+                    value: pulseOpacity
+                )
+                .onAppear {
+                    pulseOpacity = 0.4
+                }
+
+            // Timer - prominent display
+            Text(formatTime(recordingService.elapsedTime))
+                .font(.system(size: 22, weight: .semibold, design: .monospaced))
+                .foregroundColor(recordingService.state.isPaused ? .secondary : .primary)
+                .frame(minWidth: 80, alignment: .leading)
+
+            Spacer()
+
+            if isSaving {
+                ProgressView()
+                    .scaleEffect(0.8)
+                Text("Saving...")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            } else {
+                // Pause/Resume
+                Button(action: {
+                    if recordingService.state.isPaused {
+                        recordingService.resumeRecording()
+                    } else {
+                        recordingService.pauseRecording()
+                    }
+                }) {
+                    Image(systemName: recordingService.state.isPaused ? "play.fill" : "pause.fill")
+                        .font(.system(size: 14))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help(recordingService.state.isPaused ? "Resume" : "Pause")
+
+                // Stop button
+                Button(action: stopRecording) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "stop.fill")
+                            .font(.system(size: 12))
+                        Text("Stop")
+                            .font(.system(size: 12, weight: .medium))
+                    }
+                    .foregroundColor(.white)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.red)
+                .controlSize(.small)
+                .help("Stop and Save")
+
+                // Cancel button
+                Button(action: cancelRecording) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 12))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help("Cancel Recording")
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .frame(width: 320)
+        .onChange(of: recordingService.state) { _, newState in
+            if case .idle = newState {
+                controller.hidePanel()
+            }
+        }
+    }
+
+    private func stopRecording() {
+        isSaving = true
+        Task {
+            do {
+                _ = try await recordingService.stopRecording()
+            } catch {
+                print("❌ Error stopping recording: \(error)")
+            }
+            isSaving = false
+        }
+    }
+
+    private func cancelRecording() {
+        Task {
+            await recordingService.cancelRecording()
+        }
+    }
+
+    private func formatTime(_ time: TimeInterval) -> String {
+        let minutes = Int(time) / 60
+        let seconds = Int(time) % 60
+        return String(format: "%02d:%02d", minutes, seconds)
     }
 }
 

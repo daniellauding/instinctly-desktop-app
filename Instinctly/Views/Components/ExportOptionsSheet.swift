@@ -4,12 +4,14 @@ import UniformTypeIdentifiers
 struct ExportOptionsSheet: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.dismiss) private var dismiss
+    @StateObject private var libraryService = LibraryService.shared
 
     @State private var selectedFormat: ExportFormat = .png
     @State private var jpegQuality: Double = 0.9
     @State private var includeAnnotations: Bool = true
     @State private var selectedCollection: String? = nil
     @State private var isExporting = false
+    @State private var showSavedAlert = false
 
     enum ExportFormat: String, CaseIterable {
         case png = "PNG"
@@ -116,17 +118,20 @@ struct ExportOptionsSheet: View {
 
                 // Save to Collection
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Save to Collection")
+                    Text("Save to Library")
                         .font(.subheadline)
                         .foregroundColor(.secondary)
 
                     Menu {
-                        Button("Default") { selectedCollection = "Default" }
-                        Button("Screenshots") { selectedCollection = "Screenshots" }
+                        ForEach(libraryService.collections, id: \.self) { collection in
+                            Button(collection) { selectedCollection = collection }
+                        }
                         Divider()
                         Button("New Collection...") { createNewCollection() }
                     } label: {
                         HStack {
+                            Image(systemName: "folder")
+                                .foregroundColor(.blue)
                             Text(selectedCollection ?? "Select collection...")
                                 .foregroundColor(selectedCollection == nil ? .secondary : .primary)
                             Spacer()
@@ -169,6 +174,11 @@ struct ExportOptionsSheet: View {
             .padding()
         }
         .frame(width: 400)
+        .alert("Saved!", isPresented: $showSavedAlert) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text("Image saved to \(selectedCollection ?? "library")")
+        }
     }
 
     // MARK: - Actions
@@ -245,12 +255,25 @@ struct ExportOptionsSheet: View {
     }
 
     private func saveToCollection() {
-        // TODO: Implement Core Data save
-        dismiss()
+        guard let image = getExportImage(),
+              let collection = selectedCollection else { return }
+
+        do {
+            _ = try libraryService.saveScreenshot(image, collection: collection)
+            showSavedAlert = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                dismiss()
+            }
+        } catch {
+            print("❌ Failed to save to library: \(error)")
+        }
     }
 
     private func createNewCollection() {
-        // TODO: Show create collection dialog
+        // For now, add a generic new collection
+        let newName = "Collection \(libraryService.collections.count + 1)"
+        libraryService.addCollection(newName)
+        selectedCollection = newName
     }
 
     private func formattedDate() -> String {

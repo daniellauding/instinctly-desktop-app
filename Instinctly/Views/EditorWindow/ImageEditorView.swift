@@ -22,7 +22,11 @@ struct ImageEditorView: View {
                 EditorTopBar(
                     showExportSheet: $showExportSheet,
                     showShareSheet: $showShareSheet,
-                    onClose: { dismiss() }
+                    onClose: {
+                        // Clear the current image and go back to welcome screen
+                        appState.currentImage = nil
+                        appState.annotations = []
+                    }
                 )
 
                 // Canvas

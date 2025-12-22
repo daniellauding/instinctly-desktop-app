@@ -4,6 +4,7 @@ import AVFoundation
 import ScreenCaptureKit
 import Combine
 import os.log
+import UniformTypeIdentifiers
 
 private let recordLogger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "Instinctly", category: "ScreenRecording")
 
@@ -287,6 +288,9 @@ class ScreenRecordingService: NSObject, ObservableObject {
             state = .recording(duration: 0)
             recordLogger.info("✅ Recording started")
 
+            // Show floating control panel
+            FloatingRecordingPanelController.shared.showPanel()
+
         } catch {
             state = .error(error.localizedDescription)
             recordLogger.error("❌ Failed to start recording: \(error.localizedDescription)")
@@ -324,8 +328,9 @@ class ScreenRecordingService: NSObject, ObservableObject {
         timer?.invalidate()
         recordLogger.info("🛑 Stopping recording...")
 
-        // Hide overlay
+        // Hide overlays and panels
         hideRecordingOverlay()
+        FloatingRecordingPanelController.shared.hidePanel()
 
         // Handle voice-only recording
         if configuration.captureMode == .voiceOnly {
@@ -349,28 +354,91 @@ class ScreenRecordingService: NSObject, ObservableObject {
             await finalizeAssetWriter()
         }
 
-        // Move to Downloads
-        let downloadsURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first!
-        let finalURL = downloadsURL.appendingPathComponent(outputURL.lastPathComponent)
-
-        if FileManager.default.fileExists(atPath: finalURL.path) {
-            try FileManager.default.removeItem(at: finalURL)
-        }
-        try FileManager.default.moveItem(at: outputURL, to: finalURL)
+        // Save using NSSavePanel for proper sandbox permissions
+        let finalURL = try await saveRecordingWithPanel(tempURL: outputURL)
 
         state = .idle
         recordLogger.info("✅ Recording saved to: \(finalURL.path)")
 
-        // Reveal in Finder
-        NSWorkspace.shared.selectFile(finalURL.path, inFileViewerRootedAtPath: "")
+        // Also save to library for Collections view
+        await saveToLibrary(url: finalURL)
+
+        // Open the recording in the default app (e.g., QuickTime for videos)
+        NSWorkspace.shared.open(finalURL)
 
         return finalURL
+    }
+
+    /// Save recording to local library
+    private func saveToLibrary(url: URL) async {
+        await MainActor.run {
+            let itemType: LibraryItem.ItemType
+            switch configuration.outputFormat {
+            case .gif:
+                itemType = .gif
+            case .m4a:
+                itemType = .voiceRecording
+            default:
+                itemType = .recording
+            }
+
+            do {
+                _ = try LibraryService.shared.saveRecording(
+                    from: url,
+                    type: itemType,
+                    collection: "Recordings"
+                )
+                recordLogger.info("📚 Recording added to library")
+            } catch {
+                recordLogger.warning("⚠️ Failed to save to library: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Show save panel to let user choose location (sandbox-safe)
+    private func saveRecordingWithPanel(tempURL: URL) async throws -> URL {
+        return try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.main.async {
+                let savePanel = NSSavePanel()
+                savePanel.allowedContentTypes = [.mpeg4Movie, .gif, .quickTimeMovie, .mpeg4Audio]
+                savePanel.nameFieldStringValue = tempURL.lastPathComponent
+                savePanel.directoryURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Desktop")
+                savePanel.title = "Save Recording"
+                savePanel.message = "Choose where to save your recording"
+                savePanel.canCreateDirectories = true
+
+                savePanel.begin { response in
+                    if response == .OK, let url = savePanel.url {
+                        do {
+                            // Remove existing file if present
+                            if FileManager.default.fileExists(atPath: url.path) {
+                                try FileManager.default.removeItem(at: url)
+                            }
+                            // Copy to user-selected location
+                            try FileManager.default.copyItem(at: tempURL, to: url)
+                            // Clean up temp file
+                            try? FileManager.default.removeItem(at: tempURL)
+                            recordLogger.info("✅ Recording saved to: \(url.path)")
+                            continuation.resume(returning: url)
+                        } catch {
+                            recordLogger.error("❌ Failed to save: \(error.localizedDescription)")
+                            continuation.resume(throwing: error)
+                        }
+                    } else {
+                        // User cancelled - keep file in temp and return that
+                        recordLogger.info("⚠️ Save cancelled, file remains at: \(tempURL.path)")
+                        continuation.resume(returning: tempURL)
+                    }
+                }
+            }
+        }
     }
 
     /// Cancel recording without saving
     func cancelRecording() async {
         timer?.invalidate()
         hideRecordingOverlay()
+        FloatingRecordingPanelController.shared.hidePanel()
 
         // Handle voice-only recording
         if configuration.captureMode == .voiceOnly {
@@ -438,6 +506,9 @@ class ScreenRecordingService: NSObject, ObservableObject {
 
             state = .recording(duration: 0)
             recordLogger.info("🎤 Voice recording started")
+
+            // Show floating control panel
+            FloatingRecordingPanelController.shared.showPanel()
         } catch {
             state = .error("Failed to start voice recording: \(error.localizedDescription)")
             throw error
@@ -453,20 +524,17 @@ class ScreenRecordingService: NSObject, ObservableObject {
             throw RecordingError.noOutputFile
         }
 
-        // Move to Downloads
-        let downloadsURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first!
-        let finalURL = downloadsURL.appendingPathComponent(outputURL.lastPathComponent)
-
-        if FileManager.default.fileExists(atPath: finalURL.path) {
-            try FileManager.default.removeItem(at: finalURL)
-        }
-        try FileManager.default.moveItem(at: outputURL, to: finalURL)
+        // Save using NSSavePanel for proper sandbox permissions
+        let finalURL = try await saveRecordingWithPanel(tempURL: outputURL)
 
         state = .idle
         recordLogger.info("✅ Voice recording saved to: \(finalURL.path)")
 
-        // Reveal in Finder
-        NSWorkspace.shared.selectFile(finalURL.path, inFileViewerRootedAtPath: "")
+        // Also save to library for Collections view
+        await saveToLibrary(url: finalURL)
+
+        // Open the recording in the default app
+        NSWorkspace.shared.open(finalURL)
 
         return finalURL
     }

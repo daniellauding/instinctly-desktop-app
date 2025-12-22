@@ -15,6 +15,8 @@ class CloudSyncService: ObservableObject {
 
     private var persistentContainer: NSPersistentCloudKitContainer?
 
+    private let container = CKContainer(identifier: "iCloud.com.instinctly.app")
+
     private init() {
         checkCloudAvailability()
     }
@@ -62,25 +64,39 @@ class CloudSyncService: ObservableObject {
     // MARK: - Cloud Availability
 
     func checkCloudAvailability() {
-        CKContainer.default().accountStatus { [weak self] status, error in
-            DispatchQueue.main.async {
-                switch status {
-                case .available:
-                    self?.isCloudAvailable = true
-                case .noAccount:
-                    self?.isCloudAvailable = false
-                    self?.syncError = CloudSyncError.noAccount
-                case .restricted:
-                    self?.isCloudAvailable = false
-                    self?.syncError = CloudSyncError.restricted
-                case .couldNotDetermine:
-                    self?.isCloudAvailable = false
-                    self?.syncError = error
-                case .temporarilyUnavailable:
-                    self?.isCloudAvailable = false
-                    self?.syncError = CloudSyncError.temporarilyUnavailable
-                @unknown default:
-                    self?.isCloudAvailable = false
+        Task {
+            do {
+                let status = try await container.accountStatus()
+                await MainActor.run {
+                    switch status {
+                    case .available:
+                        self.isCloudAvailable = true
+                        print("☁️ CloudSync: iCloud available!")
+                    case .noAccount:
+                        self.isCloudAvailable = false
+                        self.syncError = CloudSyncError.noAccount
+                        print("⚠️ CloudSync: No iCloud account")
+                    case .restricted:
+                        self.isCloudAvailable = false
+                        self.syncError = CloudSyncError.restricted
+                        print("⚠️ CloudSync: iCloud restricted")
+                    case .couldNotDetermine:
+                        self.isCloudAvailable = false
+                        print("⚠️ CloudSync: Could not determine iCloud status")
+                    case .temporarilyUnavailable:
+                        self.isCloudAvailable = false
+                        self.syncError = CloudSyncError.temporarilyUnavailable
+                        print("⚠️ CloudSync: iCloud temporarily unavailable")
+                    @unknown default:
+                        self.isCloudAvailable = false
+                        print("⚠️ CloudSync: Unknown iCloud status")
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    self.isCloudAvailable = false
+                    self.syncError = error
+                    print("❌ CloudSync: Error checking iCloud: \(error.localizedDescription)")
                 }
             }
         }

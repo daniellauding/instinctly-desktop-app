@@ -15,12 +15,55 @@ class ShareService: ObservableObject {
     @Published var isSharing = false
     @Published var shareError: Error?
     @Published var lastSharedURL: URL?
+    @Published var isCloudKitAvailable = false
 
-    private let container = CKContainer(identifier: "iCloud.com.instinctly.app")
-    private let publicDatabase: CKDatabase
+    // Web viewer URL - hosted on GitHub Pages
+    private let webViewerBaseURL = "https://daniellauding.github.io/instinctly-share"
+
+    // LAZY CloudKit initialization - only when actually needed for cloud sharing
+    private var _container: CKContainer?
+    private var _publicDatabase: CKDatabase?
+
+    private var container: CKContainer {
+        if _container == nil {
+            shareLogger.info("☁️ Lazily initializing CloudKit container...")
+            _container = CKContainer(identifier: "iCloud.com.instinctly.app")
+        }
+        return _container!
+    }
+
+    private var publicDatabase: CKDatabase {
+        if _publicDatabase == nil {
+            _publicDatabase = container.publicCloudDatabase
+        }
+        return _publicDatabase!
+    }
 
     private init() {
-        publicDatabase = container.publicCloudDatabase
+        shareLogger.info("📤 ShareService initialized")
+        checkCloudKitAvailability()
+    }
+
+    /// Check if CloudKit is available (async, doesn't hang)
+    private func checkCloudKitAvailability() {
+        Task {
+            do {
+                let status = try await container.accountStatus()
+                await MainActor.run {
+                    isCloudKitAvailable = (status == .available)
+                    if isCloudKitAvailable {
+                        shareLogger.info("☁️ CloudKit available!")
+                    } else {
+                        shareLogger.info("⚠️ CloudKit not available: \(String(describing: status))")
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    isCloudKitAvailable = false
+                    shareLogger.warning("⚠️ CloudKit check failed: \(error.localizedDescription)")
+                }
+            }
+        }
     }
 
     // MARK: - Share via System Share Sheet
@@ -65,6 +108,13 @@ class ShareService: ObservableObject {
         annotations: [Annotation] = []
     ) async throws -> URL {
         shareLogger.info("☁️ Uploading image to CloudKit for sharing...")
+
+        // Check CloudKit availability first
+        guard isCloudKitAvailable else {
+            shareLogger.error("❌ CloudKit not available - cannot upload")
+            throw ShareError.notAuthenticated
+        }
+
         isSharing = true
         shareError = nil
 
@@ -110,16 +160,16 @@ class ShareService: ObservableObject {
             // Clean up temp file
             try? FileManager.default.removeItem(at: tempURL)
 
-            // Generate shareable URL
-            // Format: instinctly://share/{shareId} or a web URL if you have a web viewer
-            let shareURL = URL(string: "instinctly://share/\(shareId)")!
+            // Generate shareable URL - Web viewer format
+            // This URL works in browsers if you host the Web/index.html file
+            let shareURL = URL(string: "\(webViewerBaseURL)?id=\(shareId)")!
 
-            // Also create a CloudKit share URL for web access
-            // This requires setting up a CloudKit web service
-            // For now, we'll use a custom URL scheme + clipboard
+            // Also store app URL for direct app opening
+            let appURL = URL(string: "instinctly://share/\(shareId)")!
+            shareLogger.info("🌐 Web URL: \(shareURL.absoluteString)")
+            shareLogger.info("📱 App URL: \(appURL.absoluteString)")
 
             lastSharedURL = shareURL
-            shareLogger.info("🔗 Share URL: \(shareURL.absoluteString)")
 
             return shareURL
         } catch {
