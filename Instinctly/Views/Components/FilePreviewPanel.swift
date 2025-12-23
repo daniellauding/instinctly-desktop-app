@@ -285,7 +285,9 @@ struct FilePreviewPanel: View {
             }
             
         case "mp4", "mov", "webm":
-            let player = AVPlayer(url: fileURL)
+            let asset = AVURLAsset(url: fileURL)
+            let playerItem = AVPlayerItem(asset: asset)
+            let player = AVPlayer(playerItem: playerItem)
             return .video(player)
             
         case "m4a":

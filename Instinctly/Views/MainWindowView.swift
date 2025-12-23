@@ -1,6 +1,7 @@
 import SwiftUI
 import ScreenCaptureKit
 import AVFoundation
+import UserNotifications
 
 struct MainWindowView: View {
     @EnvironmentObject private var appState: AppState
@@ -209,6 +210,38 @@ struct MainWindowView: View {
         libraryService.removeCollection(name)
         if selectedCollection == name {
             selectedCollection = nil
+        }
+    }
+    
+    private func showNotification(title: String, body: String) async {
+        let center = UNUserNotificationCenter.current()
+        
+        // Request permission if needed
+        do {
+            _ = try await center.requestAuthorization(options: [.alert, .sound])
+        } catch {
+            print("❌ Failed to request notification permission: \(error)")
+            return
+        }
+        
+        // Create notification content
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+        
+        // Create request
+        let request = UNNotificationRequest(
+            identifier: UUID().uuidString,
+            content: content,
+            trigger: nil
+        )
+        
+        // Schedule notification
+        do {
+            try await center.add(request)
+        } catch {
+            print("❌ Failed to show notification: \(error)")
         }
     }
     
@@ -542,11 +575,9 @@ struct SidebarRecordButton: View {
             let item = try LibraryService.shared.saveRecording(from: url, type: itemType, name: name, collection: "Recordings")
             
             // Show notification that it was saved
-            let notification = NSUserNotification()
-            notification.title = "Recording Saved"
-            notification.informativeText = "'\(name)' was saved to your library"
-            notification.soundName = NSUserNotificationDefaultSoundName
-            NSUserNotificationCenter.default.deliver(notification)
+            Task {
+                await showNotification(title: "Recording Saved", body: "'\(name)' was saved to your library")
+            }
             
             // Open the file in default app (QuickTime for videos, Preview for GIFs)
             NSWorkspace.shared.open(url)
@@ -1015,11 +1046,9 @@ struct RecentFileCard: View {
             _ = try LibraryService.shared.saveRecording(from: fileURL, type: itemType, name: name, collection: "Recordings")
             
             // Show notification
-            let notification = NSUserNotification()
-            notification.title = "Saved to Library"
-            notification.informativeText = "'\(name)' was added to your library"
-            notification.soundName = NSUserNotificationDefaultSoundName
-            NSUserNotificationCenter.default.deliver(notification)
+            Task {
+                await showNotification(title: "Saved to Library", body: "'\(name)' was added to your library")
+            }
             
             print("✅ Saved to library: \(name)")
         } catch {
@@ -1085,7 +1114,7 @@ struct RecentFileCard: View {
     
     private func generateVideoThumbnail(for url: URL) async -> NSImage? {
         return await withCheckedContinuation { continuation in
-            let asset = AVAsset(url: url)
+            let asset = AVURLAsset(url: url)
             let imageGenerator = AVAssetImageGenerator(asset: asset)
             imageGenerator.appliesPreferredTrackTransform = true
             imageGenerator.maximumSize = CGSize(width: 300, height: 200)
@@ -1253,9 +1282,8 @@ struct LibraryItemCard: View {
             loadThumbnail()
         }
         .sheet(isPresented: $showPreview) {
-            if let url = item.url {
-                FilePreviewPanel(fileURL: url, isPresented: $showPreview)
-            }
+            let url = libraryService.fileURL(for: item)
+            FilePreviewPanel(fileURL: url, isPresented: $showPreview)
         }
     }
 
@@ -1312,7 +1340,7 @@ struct LibraryItemCard: View {
     
     private func generateVideoThumbnailFromURL(_ url: URL) async -> NSImage? {
         return await withCheckedContinuation { continuation in
-            let asset = AVAsset(url: url)
+            let asset = AVURLAsset(url: url)
             let imageGenerator = AVAssetImageGenerator(asset: asset)
             imageGenerator.appliesPreferredTrackTransform = true
             imageGenerator.maximumSize = CGSize(width: 300, height: 200)
