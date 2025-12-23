@@ -4,6 +4,7 @@ import CloudKit
 import SwiftUI
 import Combine
 import os.log
+import CommonCrypto
 
 private let shareLogger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "Instinctly", category: "ShareService")
 
@@ -183,21 +184,23 @@ class ShareService: ObservableObject {
     /// Upload file to CloudKit public database and get a shareable link
     func uploadFileAndGetShareableLink(
         fileURL: URL,
-        title: String? = nil
+        title: String? = nil,
+        collection: String? = nil,
+        password: String? = nil
     ) async throws -> URL {
         shareLogger.info("☁️ Uploading file to CloudKit for sharing: \(fileURL.lastPathComponent)")
-        
+
         // Check CloudKit availability first
         guard isCloudKitAvailable else {
             shareLogger.error("❌ CloudKit not available - cannot upload")
             throw ShareError.notAuthenticated
         }
-        
+
         isSharing = true
         shareError = nil
-        
+
         defer { isSharing = false }
-        
+
         // Determine media type from file extension
         let ext = fileURL.pathExtension.lowercased()
         let mediaType: String
@@ -210,43 +213,75 @@ class ShareService: ObservableObject {
             mediaType = "audio"
         case "png", "jpg", "jpeg":
             mediaType = "image"
+        case "pdf":
+            mediaType = "pdf"
+        case "md", "txt":
+            mediaType = "text"
         default:
             mediaType = "file"
         }
-        
+
         // Create a unique share ID
         let shareId = UUID().uuidString
-        
+
         // Create CloudKit record
         let recordID = CKRecord.ID(recordName: shareId)
         let record = CKRecord(recordType: "SharedImage", recordID: recordID)
         record["title"] = title ?? fileURL.lastPathComponent
         record["createdAt"] = Date()
-        record["mediaType"] = mediaType  // Add type info but keep imageAsset field name for compatibility
+        record["mediaType"] = mediaType
         record["fileName"] = fileURL.lastPathComponent
-        record["imageAsset"] = CKAsset(fileURL: fileURL)  // Keep original field name for web viewer compatibility
-        
+        record["imageAsset"] = CKAsset(fileURL: fileURL)
+
+        // Add collection if provided
+        if let collection = collection {
+            record["collection"] = collection
+        }
+
+        // Add password hash if provided (don't store plain text!)
+        if let password = password, !password.isEmpty {
+            // Simple hash for demonstration - in production use proper bcrypt or similar
+            let passwordHash = hashPassword(password)
+            record["passwordHash"] = passwordHash
+        }
+
         // Upload to public database
         do {
             let savedRecord = try await publicDatabase.save(record)
             shareLogger.info("✅ Record saved: \(savedRecord.recordID.recordName)")
-            
+
             // Generate shareable URL - Web viewer format
             let shareURL = URL(string: "\(webViewerBaseURL)?id=\(shareId)")!
-            
+
             // Also store app URL for direct app opening
             let appURL = URL(string: "instinctly://share/\(shareId)")!
             shareLogger.info("🌐 Web URL: \(shareURL.absoluteString)")
             shareLogger.info("📱 App URL: \(appURL.absoluteString)")
-            
+
             lastSharedURL = shareURL
-            
+
             return shareURL
         } catch {
             shareLogger.error("❌ CloudKit upload failed: \(error.localizedDescription)")
             shareError = error
             throw error
         }
+    }
+
+    /// Simple password hashing (use bcrypt in production)
+    private func hashPassword(_ password: String) -> String {
+        // SHA256 hash - good enough for simple protection
+        let data = Data(password.utf8)
+        var hash = [UInt8](repeating: 0, count: Int(CC_SHA256_DIGEST_LENGTH))
+        data.withUnsafeBytes {
+            _ = CC_SHA256($0.baseAddress, CC_LONG(data.count), &hash)
+        }
+        return hash.map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Verify password against stored hash
+    func verifyPassword(_ password: String, hash: String) -> Bool {
+        return hashPassword(password) == hash
     }
 
     // MARK: - Fetch Shared Image
@@ -305,25 +340,24 @@ class ShareService: ObservableObject {
     }
 
     /// Fetch all shared media from CloudKit for management
-    func fetchAllSharedMedia() async throws -> [(recordID: String, title: String, fileName: String, mediaType: String, createdAt: Date)] {
+    func fetchAllSharedMedia() async throws -> [(recordID: String, title: String, fileName: String, mediaType: String, createdAt: Date, collection: String?)] {
         shareLogger.info("📥 Fetching all shared media from CloudKit...")
-        
+
         guard isCloudKitAvailable else {
             shareLogger.error("❌ CloudKit not available")
             throw ShareError.notAuthenticated
         }
-        
+
         // Use a simple predicate that doesn't reference record fields that aren't queryable
         let predicate = NSPredicate(value: true)
         let query = CKQuery(recordType: "SharedImage", predicate: predicate)
-        
-        // Only sort by indexed fields - createdAt should be queryable by default
-        query.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
-        
+
+        // No server-side sorting to avoid index issues - sort client-side instead
+
         do {
             let result = try await publicDatabase.records(matching: query)
-            var sharedMedia: [(recordID: String, title: String, fileName: String, mediaType: String, createdAt: Date)] = []
-            
+            var sharedMedia: [(recordID: String, title: String, fileName: String, mediaType: String, createdAt: Date, collection: String?)] = []
+
             for (recordID, recordResult) in result.matchResults {
                 switch recordResult {
                 case .success(let record):
@@ -331,19 +365,24 @@ class ShareService: ObservableObject {
                     let fileName = record["fileName"] as? String ?? title
                     let mediaType = record["mediaType"] as? String ?? "image"
                     let createdAt = record.creationDate ?? Date()
-                    
+                    let collection = record["collection"] as? String
+
                     sharedMedia.append((
                         recordID: recordID.recordName,
                         title: title,
                         fileName: fileName,
                         mediaType: mediaType,
-                        createdAt: createdAt
+                        createdAt: createdAt,
+                        collection: collection
                     ))
                 case .failure(let error):
                     shareLogger.warning("⚠️ Failed to process record \(recordID): \(error)")
                 }
             }
-            
+
+            // Sort client-side by createdAt (newest first)
+            sharedMedia.sort { $0.createdAt > $1.createdAt }
+
             shareLogger.info("✅ Fetched \(sharedMedia.count) shared media items")
             return sharedMedia
         } catch {

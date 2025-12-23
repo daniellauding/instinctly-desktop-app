@@ -2,6 +2,7 @@ import SwiftUI
 import ScreenCaptureKit
 import AVFoundation
 import UserNotifications
+import UniformTypeIdentifiers
 
 // MARK: - Notification Helper
 struct NotificationHelper {
@@ -849,20 +850,45 @@ struct RecentFilesGridView: View {
 // MARK: - Shared Links Grid View
 struct SharedLinksGridView: View {
     @ObservedObject var appState: AppState
-    
-    @State private var sharedItems: [(recordID: String, title: String, fileName: String, mediaType: String, createdAt: Date)] = []
+
+    @State private var sharedItems: [(recordID: String, title: String, fileName: String, mediaType: String, createdAt: Date, collection: String?)] = []
     @State private var isLoading = false
     @State private var searchText = ""
-    
-    private let columns = [GridItem(.adaptive(minimum: 200, maximum: 250), spacing: 16)]
-    
-    private var filteredItems: [(recordID: String, title: String, fileName: String, mediaType: String, createdAt: Date)] {
+    @State private var viewMode: ViewMode = .grid
+    @State private var isUploading = false
+    @State private var uploadProgress: String = ""
+    @State private var isDragging = false
+    @State private var showUploadSheet = false
+    @State private var pendingUploadURLs: [URL] = []
+    @State private var uploadPassword: String = ""
+    @State private var uploadCollection: String = ""
+    @StateObject private var shareService = ShareService.shared
+    @StateObject private var libraryService = LibraryService.shared
+
+    enum ViewMode: String, CaseIterable {
+        case grid = "Grid"
+        case list = "List"
+
+        var icon: String {
+            switch self {
+            case .grid: return "square.grid.2x2"
+            case .list: return "list.bullet"
+            }
+        }
+    }
+
+    private let gridColumns = [GridItem(.adaptive(minimum: 200, maximum: 250), spacing: 16)]
+
+    private var filteredItems: [(recordID: String, title: String, fileName: String, mediaType: String, createdAt: Date, collection: String?)] {
         if searchText.isEmpty {
             return sharedItems
         }
         return sharedItems.filter { $0.fileName.localizedCaseInsensitiveContains(searchText) }
     }
-    
+
+    // Supported file types for upload
+    private let supportedTypes: [String] = ["png", "jpg", "jpeg", "gif", "mp4", "mov", "webm", "m4a", "wav", "pdf", "md", "txt"]
+
     var body: some View {
         VStack(spacing: 0) {
             // Header
@@ -870,61 +896,144 @@ struct SharedLinksGridView: View {
                 Text("Shared Links")
                     .font(.title2)
                     .fontWeight(.semibold)
-                
+
                 Spacer()
-                
+
+                if isUploading {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .scaleEffect(0.8)
+                        Text(uploadProgress)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+
                 if isLoading {
                     ProgressView()
                         .scaleEffect(0.8)
                 }
-                
+
+                // View mode toggle
+                Picker("View", selection: $viewMode) {
+                    ForEach(ViewMode.allCases, id: \.self) { mode in
+                        Image(systemName: mode.icon)
+                            .tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 80)
+                .help("Toggle view mode")
+
+                // Add file button
+                Button(action: openFilePicker) {
+                    Image(systemName: "plus")
+                }
+                .help("Add files to share")
+                .disabled(isUploading)
+
                 Button(action: loadSharedItems) {
                     Image(systemName: "arrow.clockwise")
                 }
                 .help("Refresh")
             }
             .padding(16)
-            
+
             // Search
             HStack {
+                Image(systemName: "magnifyingglass")
+                    .foregroundColor(.secondary)
                 TextField("Search shared files...", text: $searchText)
-                    .textFieldStyle(.roundedBorder)
+                    .textFieldStyle(.plain)
+                if !searchText.isEmpty {
+                    Button(action: { searchText = "" }) {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
             }
+            .padding(8)
+            .background(Color.primary.opacity(0.05))
+            .cornerRadius(8)
             .padding(.horizontal, 16)
             .padding(.bottom, 16)
-            
+
             // Content
-            if filteredItems.isEmpty {
-                VStack(spacing: 16) {
-                    Spacer()
-                    Image(systemName: "link.circle")
-                        .font(.system(size: 64))
-                        .foregroundColor(.secondary.opacity(0.5))
-                    Text(isLoading ? "Loading..." : "No Shared Links")
-                        .font(.title2)
-                        .foregroundColor(.secondary)
-                    Text("Files you share to iCloud URLs will appear here")
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
-                    if !isLoading {
-                        Button("Load Shared Files") {
-                            loadSharedItems()
+            if filteredItems.isEmpty && !isDragging {
+                // Empty state with drop zone
+                ZStack {
+                    VStack(spacing: 16) {
+                        Spacer()
+                        Image(systemName: "link.circle")
+                            .font(.system(size: 64))
+                            .foregroundColor(.secondary.opacity(0.5))
+                        Text(isLoading ? "Loading..." : "No Shared Links")
+                            .font(.title2)
+                            .foregroundColor(.secondary)
+                        Text("Drop files here or click + to upload and share")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                        if !isLoading {
+                            HStack(spacing: 12) {
+                                Button("Add Files") {
+                                    openFilePicker()
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .disabled(isUploading)
+
+                                Button("Load Shared Files") {
+                                    loadSharedItems()
+                                }
+                                .buttonStyle(.bordered)
+                            }
                         }
-                        .buttonStyle(.borderedProminent)
+                        Spacer()
                     }
-                    Spacer()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                // Grid of shared items
+                // Content area with items
                 ScrollView {
-                    LazyVGrid(columns: columns, spacing: 16) {
-                        ForEach(filteredItems, id: \.recordID) { item in
-                            SharedLinkCard(item: item, onDelete: { deleteItem(item.recordID) })
+                    if viewMode == .grid {
+                        // Grid view
+                        LazyVGrid(columns: gridColumns, spacing: 16) {
+                            ForEach(filteredItems, id: \.recordID) { item in
+                                SharedLinkCard(item: item, onDelete: { deleteItem(item.recordID) })
+                            }
                         }
+                        .padding(16)
+                    } else {
+                        // List view
+                        LazyVStack(spacing: 8) {
+                            ForEach(filteredItems, id: \.recordID) { item in
+                                SharedLinkListRow(item: item, onDelete: { deleteItem(item.recordID) })
+                            }
+                        }
+                        .padding(16)
                     }
-                    .padding(16)
                 }
+            }
+
+            // Drag overlay
+            if isDragging {
+                ZStack {
+                    Color.accentColor.opacity(0.1)
+
+                    VStack(spacing: 12) {
+                        Image(systemName: "arrow.down.doc")
+                            .font(.system(size: 48))
+                            .foregroundColor(.accentColor)
+                        Text("Drop files to upload and share")
+                            .font(.headline)
+                            .foregroundColor(.accentColor)
+                    }
+                }
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .strokeBorder(Color.accentColor, style: StrokeStyle(lineWidth: 3, dash: [10]))
+                        .padding(8)
+                )
             }
         }
         .onAppear {
@@ -935,6 +1044,130 @@ struct SharedLinksGridView: View {
         .refreshable {
             loadSharedItems()
         }
+        .onDrop(of: [.fileURL], isTargeted: $isDragging) { providers in
+            handleDrop(providers: providers)
+            return true
+        }
+        .sheet(isPresented: $showUploadSheet) {
+            UploadShareSheet(
+                urls: pendingUploadURLs,
+                password: $uploadPassword,
+                collection: $uploadCollection,
+                collections: libraryService.collections,
+                onUpload: { password, collection in
+                    showUploadSheet = false
+                    uploadFilesWithOptions(urls: pendingUploadURLs, password: password, collection: collection)
+                    pendingUploadURLs = []
+                    uploadPassword = ""
+                    uploadCollection = ""
+                },
+                onCancel: {
+                    showUploadSheet = false
+                    pendingUploadURLs = []
+                    uploadPassword = ""
+                    uploadCollection = ""
+                }
+            )
+        }
+    }
+
+    // MARK: - File Upload
+
+    private func openFilePicker() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowedContentTypes = [
+            .png, .jpeg, .gif,
+            .mpeg4Movie, .quickTimeMovie,
+            .audio,
+            .pdf, .plainText
+        ]
+        panel.message = "Select files to upload and share"
+
+        if panel.runModal() == .OK {
+            pendingUploadURLs = panel.urls
+            showUploadSheet = true
+        }
+    }
+
+    private func handleDrop(providers: [NSItemProvider]) {
+        var droppedURLs: [URL] = []
+
+        let group = DispatchGroup()
+        for provider in providers {
+            group.enter()
+            provider.loadItem(forTypeIdentifier: "public.file-url", options: nil) { data, error in
+                defer { group.leave() }
+                guard let data = data as? Data,
+                      let urlString = String(data: data, encoding: .utf8),
+                      let url = URL(string: urlString) else {
+                    return
+                }
+
+                // Check if file type is supported
+                let ext = url.pathExtension.lowercased()
+                if supportedTypes.contains(ext) {
+                    droppedURLs.append(url)
+                }
+            }
+        }
+
+        group.notify(queue: .main) {
+            if !droppedURLs.isEmpty {
+                pendingUploadURLs = droppedURLs
+                showUploadSheet = true
+            }
+        }
+    }
+
+    private func uploadFilesWithOptions(urls: [URL], password: String?, collection: String?) {
+        guard !urls.isEmpty else { return }
+
+        isUploading = true
+        uploadProgress = "Uploading \(urls.count) file(s)..."
+
+        Task {
+            var successCount = 0
+            var failCount = 0
+
+            for (index, url) in urls.enumerated() {
+                await MainActor.run {
+                    uploadProgress = "Uploading \(index + 1) of \(urls.count)..."
+                }
+
+                do {
+                    _ = try await shareService.uploadFileAndGetShareableLink(
+                        fileURL: url,
+                        collection: collection?.isEmpty == false ? collection : nil,
+                        password: password?.isEmpty == false ? password : nil
+                    )
+                    successCount += 1
+                } catch {
+                    failCount += 1
+                    print("❌ Failed to upload \(url.lastPathComponent): \(error)")
+                }
+            }
+
+            await MainActor.run {
+                isUploading = false
+                uploadProgress = ""
+
+                // Show notification
+                if successCount > 0 {
+                    Task {
+                        await NotificationHelper.showNotification(
+                            title: "Files Uploaded",
+                            body: "\(successCount) file(s) uploaded successfully\(failCount > 0 ? ", \(failCount) failed" : "")"
+                        )
+                    }
+                }
+
+                // Reload the list
+                loadSharedItems()
+            }
+        }
     }
     
     private func loadSharedItems() {
@@ -943,7 +1176,10 @@ struct SharedLinksGridView: View {
             do {
                 let items = try await ShareService.shared.fetchAllSharedMedia()
                 await MainActor.run {
-                    sharedItems = items
+                    // Map to include collection field (nil for now, will be populated from CloudKit)
+                    sharedItems = items.map { item in
+                        (recordID: item.recordID, title: item.title, fileName: item.fileName, mediaType: item.mediaType, createdAt: item.createdAt, collection: item.collection)
+                    }
                     isLoading = false
                 }
             } catch {
@@ -954,7 +1190,7 @@ struct SharedLinksGridView: View {
             }
         }
     }
-    
+
     private func deleteItem(_ recordID: String) {
         Task {
             do {
@@ -972,17 +1208,261 @@ struct SharedLinksGridView: View {
     }
 }
 
-// MARK: - Shared Link Card
-struct SharedLinkCard: View {
-    let item: (recordID: String, title: String, fileName: String, mediaType: String, createdAt: Date)
+// MARK: - Upload Share Sheet
+struct UploadShareSheet: View {
+    let urls: [URL]
+    @Binding var password: String
+    @Binding var collection: String
+    let collections: [String]
+    let onUpload: (String?, String?) -> Void
+    let onCancel: () -> Void
+
+    @State private var usePassword = false
+
+    var body: some View {
+        VStack(spacing: 20) {
+            // Header
+            HStack {
+                Text("Upload & Share")
+                    .font(.headline)
+                Spacer()
+                Button("Cancel") { onCancel() }
+                    .keyboardShortcut(.cancelAction)
+            }
+
+            // Files to upload
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Files to share:")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(urls, id: \.self) { url in
+                            HStack(spacing: 8) {
+                                Image(systemName: iconForFile(url))
+                                    .foregroundColor(.blue)
+                                Text(url.lastPathComponent)
+                                    .font(.caption)
+                                    .lineLimit(1)
+                            }
+                        }
+                    }
+                }
+                .frame(maxHeight: 100)
+            }
+
+            Divider()
+
+            // Collection picker
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Add to collection (optional):")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+
+                Picker("Collection", selection: $collection) {
+                    Text("None").tag("")
+                    ForEach(collections, id: \.self) { coll in
+                        Text(coll).tag(coll)
+                    }
+                }
+                .pickerStyle(.menu)
+            }
+
+            // Password protection
+            VStack(alignment: .leading, spacing: 8) {
+                Toggle("Password protect", isOn: $usePassword)
+
+                if usePassword {
+                    SecureField("Enter password", text: $password)
+                        .textFieldStyle(.roundedBorder)
+
+                    Text("Recipients will need this password to view the file")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            Spacer()
+
+            // Upload button
+            HStack {
+                Spacer()
+                Button("Upload \(urls.count) file(s)") {
+                    onUpload(usePassword ? password : nil, collection.isEmpty ? nil : collection)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(usePassword && password.isEmpty)
+            }
+        }
+        .padding(24)
+        .frame(width: 400, height: 400)
+    }
+
+    private func iconForFile(_ url: URL) -> String {
+        let ext = url.pathExtension.lowercased()
+        switch ext {
+        case "png", "jpg", "jpeg": return "photo"
+        case "gif": return "photo.stack"
+        case "mp4", "mov", "webm": return "video.fill"
+        case "m4a", "wav": return "waveform"
+        case "pdf": return "doc.fill"
+        case "md", "txt": return "doc.text"
+        default: return "doc"
+        }
+    }
+}
+
+// MARK: - Shared Link List Row (for list view)
+struct SharedLinkListRow: View {
+    let item: (recordID: String, title: String, fileName: String, mediaType: String, createdAt: Date, collection: String?)
     let onDelete: () -> Void
-    
+
     @State private var isHovered = false
-    
+
     private var shareURL: String {
         "https://daniellauding.github.io/instinctly-share?id=\(item.recordID)"
     }
-    
+
+    var body: some View {
+        HStack(spacing: 12) {
+            // Media type icon
+            ZStack {
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(mediaTypeColor.opacity(0.15))
+                    .frame(width: 44, height: 44)
+
+                Image(systemName: mediaTypeIcon)
+                    .font(.system(size: 18))
+                    .foregroundColor(mediaTypeColor)
+            }
+
+            // File info
+            VStack(alignment: .leading, spacing: 2) {
+                Text(item.fileName)
+                    .font(.subheadline)
+                    .fontWeight(.medium)
+                    .lineLimit(1)
+
+                HStack(spacing: 8) {
+                    Text(item.mediaType.capitalized)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+
+                    if let collection = item.collection {
+                        HStack(spacing: 4) {
+                            Image(systemName: "folder")
+                                .font(.caption2)
+                            Text(collection)
+                                .font(.caption)
+                        }
+                        .foregroundColor(.blue)
+                    }
+
+                    Text("•")
+                        .foregroundColor(.secondary)
+
+                    Text(formatDate(item.createdAt))
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            Spacer()
+
+            // Actions (always visible in list view)
+            HStack(spacing: 8) {
+                Button(action: copyLink) {
+                    Image(systemName: "doc.on.clipboard")
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Copy Link")
+
+                Button(action: openLink) {
+                    Image(systemName: "arrow.up.right.square")
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Open in Browser")
+
+                Button(action: onDelete) {
+                    Image(systemName: "trash")
+                        .foregroundColor(.red.opacity(0.8))
+                }
+                .buttonStyle(.plain)
+                .help("Delete from iCloud")
+            }
+            .opacity(isHovered ? 1 : 0.5)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(isHovered ? Color.primary.opacity(0.05) : Color.clear)
+        )
+        .onHover { isHovered = $0 }
+        .contextMenu {
+            Button("Copy Link") { copyLink() }
+            Button("Open in Browser") { openLink() }
+            Divider()
+            Button("Delete", role: .destructive) { onDelete() }
+        }
+    }
+
+    private var mediaTypeIcon: String {
+        switch item.mediaType {
+        case "gif": return "photo.stack"
+        case "video": return "video.fill"
+        case "audio": return "waveform"
+        case "pdf": return "doc.fill"
+        case "text": return "doc.text"
+        default: return "photo"
+        }
+    }
+
+    private var mediaTypeColor: Color {
+        switch item.mediaType {
+        case "gif": return .orange
+        case "video": return .blue
+        case "audio": return .green
+        case "pdf": return .red
+        case "text": return .purple
+        default: return .gray
+        }
+    }
+
+    private func copyLink() {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(shareURL, forType: .string)
+        print("📋 Copied link: \(shareURL)")
+    }
+
+    private func openLink() {
+        if let url = URL(string: shareURL) {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    private func formatDate(_ date: Date) -> String {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.dateTimeStyle = .named
+        return formatter.localizedString(for: date, relativeTo: Date())
+    }
+}
+
+// MARK: - Shared Link Card
+struct SharedLinkCard: View {
+    let item: (recordID: String, title: String, fileName: String, mediaType: String, createdAt: Date, collection: String?)
+    let onDelete: () -> Void
+
+    @State private var isHovered = false
+
+    private var shareURL: String {
+        "https://daniellauding.github.io/instinctly-share?id=\(item.recordID)"
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             // Media type icon and controls
@@ -994,13 +1474,13 @@ struct SharedLinkCard: View {
                         VStack(spacing: 8) {
                             Image(systemName: mediaTypeIcon)
                                 .font(.system(size: 32))
-                                .foregroundColor(.secondary)
+                                .foregroundColor(mediaTypeColor)
                             Text(item.mediaType.capitalized)
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }
                     }
-                
+
                 // Controls (show on hover)
                 if isHovered {
                     HStack(spacing: 8) {
@@ -1013,7 +1493,7 @@ struct SharedLinkCard: View {
                         }
                         .buttonStyle(.plain)
                         .help("Copy Link")
-                        
+
                         Button(action: openLink) {
                             Image(systemName: "arrow.up.right.square")
                                 .foregroundColor(.white)
@@ -1023,7 +1503,7 @@ struct SharedLinkCard: View {
                         }
                         .buttonStyle(.plain)
                         .help("Open in Browser")
-                        
+
                         Button(action: onDelete) {
                             Image(systemName: "trash")
                                 .foregroundColor(.red)
@@ -1037,18 +1517,30 @@ struct SharedLinkCard: View {
                     .padding(8)
                 }
             }
-            
+
             // File info
             VStack(alignment: .leading, spacing: 4) {
                 Text(item.fileName)
                     .font(.subheadline)
                     .fontWeight(.medium)
                     .lineLimit(1)
-                
-                Text(formatDate(item.createdAt))
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                
+
+                HStack(spacing: 4) {
+                    if let collection = item.collection {
+                        Image(systemName: "folder")
+                            .font(.caption2)
+                            .foregroundColor(.blue)
+                        Text(collection)
+                            .font(.caption)
+                            .foregroundColor(.blue)
+                        Text("•")
+                            .foregroundColor(.secondary)
+                    }
+                    Text(formatDate(item.createdAt))
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+
                 Text(shareURL)
                     .font(.caption)
                     .foregroundColor(.blue)
@@ -1069,29 +1561,42 @@ struct SharedLinkCard: View {
             Button("Delete", role: .destructive) { onDelete() }
         }
     }
-    
+
     private var mediaTypeIcon: String {
         switch item.mediaType {
         case "gif": return "photo.stack"
         case "video": return "video.fill"
         case "audio": return "waveform"
+        case "pdf": return "doc.fill"
+        case "text": return "doc.text"
         default: return "photo"
         }
     }
-    
+
+    private var mediaTypeColor: Color {
+        switch item.mediaType {
+        case "gif": return .orange
+        case "video": return .blue
+        case "audio": return .green
+        case "pdf": return .red
+        case "text": return .purple
+        default: return .gray
+        }
+    }
+
     private func copyLink() {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(shareURL, forType: .string)
         print("📋 Copied link: \(shareURL)")
     }
-    
+
     private func openLink() {
         if let url = URL(string: shareURL) {
             NSWorkspace.shared.open(url)
         }
     }
-    
+
     private func formatDate(_ date: Date) -> String {
         let formatter = RelativeDateTimeFormatter()
         formatter.dateTimeStyle = .named
