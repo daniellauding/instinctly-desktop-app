@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Instinctly Share</title>
+    <script src="https://cdn.apple-cloudkit.com/ck/2/cloudkit.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            color: #fff;
+        }
+
+        .container {
+            max-width: 900px;
+            width: 90%;
+            padding: 20px;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+
+        .header h1 {
+            font-size: 1.5rem;
+            font-weight: 600;
+            margin-bottom: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+        }
+
+        .header .logo {
+            width: 32px;
+            height: 32px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border-radius: 8px;
+        }
+
+        .card {
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            border-radius: 16px;
+            padding: 24px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+        }
+
+        .loading {
+            text-align: center;
+            padding: 60px 20px;
+        }
+
+        .loading .spinner {
+            width: 40px;
+            height: 40px;
+            border: 3px solid rgba(255, 255, 255, 0.2);
+            border-top-color: #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 16px;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .error {
+            text-align: center;
+            padding: 40px 20px;
+        }
+
+        .error-icon {
+            font-size: 48px;
+            margin-bottom: 16px;
+        }
+
+        /* Password Form */
+        .password-form {
+            text-align: center;
+            padding: 40px 20px;
+        }
+
+        .password-form .lock-icon {
+            font-size: 48px;
+            margin-bottom: 16px;
+        }
+
+        .password-form h2 {
+            font-size: 1.25rem;
+            margin-bottom: 8px;
+        }
+
+        .password-form p {
+            color: rgba(255, 255, 255, 0.7);
+            margin-bottom: 24px;
+        }
+
+        .password-input-group {
+            display: flex;
+            gap: 12px;
+            max-width: 300px;
+            margin: 0 auto;
+        }
+
+        .password-input-group input {
+            flex: 1;
+            padding: 12px 16px;
+            border: none;
+            border-radius: 8px;
+            background: rgba(255, 255, 255, 0.15);
+            color: #fff;
+            font-size: 1rem;
+        }
+
+        .password-input-group input::placeholder {
+            color: rgba(255, 255, 255, 0.5);
+        }
+
+        .password-input-group button {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 8px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: #fff;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .password-input-group button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        }
+
+        .password-error {
+            color: #ff6b6b;
+            margin-top: 16px;
+            display: none;
+        }
+
+        /* Media Display */
+        .media-container {
+            text-align: center;
+        }
+
+        .media-info {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 16px;
+            padding-bottom: 16px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .media-title {
+            font-size: 1.1rem;
+            font-weight: 600;
+        }
+
+        .media-meta {
+            display: flex;
+            gap: 16px;
+            color: rgba(255, 255, 255, 0.6);
+            font-size: 0.85rem;
+        }
+
+        .media-meta span {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .media-content {
+            border-radius: 12px;
+            overflow: hidden;
+            background: rgba(0, 0, 0, 0.2);
+        }
+
+        .media-content img,
+        .media-content video {
+            max-width: 100%;
+            max-height: 70vh;
+            display: block;
+            margin: 0 auto;
+        }
+
+        .media-content audio {
+            width: 100%;
+            margin: 40px 0;
+        }
+
+        .media-content .pdf-viewer,
+        .media-content .text-viewer {
+            padding: 20px;
+            text-align: left;
+            max-height: 60vh;
+            overflow-y: auto;
+        }
+
+        .text-viewer pre {
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            font-family: 'SF Mono', Monaco, Consolas, monospace;
+            font-size: 0.9rem;
+            line-height: 1.5;
+        }
+
+        .download-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            margin-top: 20px;
+            padding: 12px 24px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: #fff;
+            text-decoration: none;
+            border-radius: 8px;
+            font-weight: 600;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .download-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        }
+
+        .footer {
+            text-align: center;
+            margin-top: 24px;
+            color: rgba(255, 255, 255, 0.4);
+            font-size: 0.8rem;
+        }
+
+        .footer a {
+            color: #667eea;
+            text-decoration: none;
+        }
+
+        /* Collection badge */
+        .collection-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 4px 10px;
+            background: rgba(102, 126, 234, 0.2);
+            border-radius: 12px;
+            font-size: 0.8rem;
+            color: #a5b4fc;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>
+                <div class="logo"></div>
+                Instinctly Share
+            </h1>
+        </div>
+
+        <div class="card">
+            <!-- Loading State -->
+            <div id="loading" class="loading">
+                <div class="spinner"></div>
+                <p>Loading shared content...</p>
+            </div>
+
+            <!-- Error State -->
+            <div id="error" class="error" style="display: none;">
+                <div class="error-icon">&#128533;</div>
+                <h2>Content Not Found</h2>
+                <p id="error-message">The shared content could not be found or has expired.</p>
+            </div>
+
+            <!-- Password Form -->
+            <div id="password-form" class="password-form" style="display: none;">
+                <div class="lock-icon">&#128274;</div>
+                <h2>Password Protected</h2>
+                <p>This content is password protected. Enter the password to view.</p>
+                <div class="password-input-group">
+                    <input type="password" id="password-input" placeholder="Enter password" onkeypress="if(event.key==='Enter')verifyPassword()">
+                    <button onclick="verifyPassword()">Unlock</button>
+                </div>
+                <p id="password-error" class="password-error">Incorrect password. Please try again.</p>
+            </div>
+
+            <!-- Media Content -->
+            <div id="media-display" class="media-container" style="display: none;">
+                <div class="media-info">
+                    <div>
+                        <div class="media-title" id="media-title">File Name</div>
+                        <span id="collection-badge" class="collection-badge" style="display: none;">
+                            &#128193; <span id="collection-name"></span>
+                        </span>
+                    </div>
+                    <div class="media-meta">
+                        <span id="view-count">&#128065; 0 views</span>
+                        <span id="media-type">Image</span>
+                    </div>
+                </div>
+                <div class="media-content" id="media-content">
+                    <!-- Content will be inserted here -->
+                </div>
+                <a id="download-btn" class="download-btn" href="#" download>
+                    &#11015; Download
+                </a>
+            </div>
+        </div>
+
+        <div class="footer">
+            Shared via <a href="https://instinctly.app">Instinctly</a> for macOS
+        </div>
+    </div>
+
+    <script>
+        // CloudKit configuration
+        const CONTAINER_ID = 'iCloud.com.instinctly.app';
+        const API_TOKEN = 'YOUR_CLOUDKIT_API_TOKEN'; // You'll need to generate this in CloudKit Dashboard
+        const ENVIRONMENT = 'production'; // or 'development'
+
+        let currentRecord = null;
+        let storedPasswordHash = null;
+
+        // Get share ID from URL
+        function getShareId() {
+            const params = new URLSearchParams(window.location.search);
+            return params.get('id');
+        }
+
+        // SHA-256 hash function (same as Swift implementation)
+        async function hashPassword(password) {
+            const encoder = new TextEncoder();
+            const data = encoder.encode(password);
+            const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+            const hashArray = Array.from(new Uint8Array(hashBuffer));
+            return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+        }
+
+        // Show error
+        function showError(message) {
+            document.getElementById('loading').style.display = 'none';
+            document.getElementById('password-form').style.display = 'none';
+            document.getElementById('media-display').style.display = 'none';
+            document.getElementById('error').style.display = 'block';
+            document.getElementById('error-message').textContent = message;
+        }
+
+        // Show password form
+        function showPasswordForm() {
+            document.getElementById('loading').style.display = 'none';
+            document.getElementById('error').style.display = 'none';
+            document.getElementById('media-display').style.display = 'none';
+            document.getElementById('password-form').style.display = 'block';
+        }
+
+        // Verify password
+        async function verifyPassword() {
+            const password = document.getElementById('password-input').value;
+            const hash = await hashPassword(password);
+
+            if (hash === storedPasswordHash) {
+                document.getElementById('password-error').style.display = 'none';
+                displayMedia(currentRecord);
+            } else {
+                document.getElementById('password-error').style.display = 'block';
+                document.getElementById('password-input').value = '';
+            }
+        }
+
+        // Display media content
+        function displayMedia(record) {
+            document.getElementById('loading').style.display = 'none';
+            document.getElementById('password-form').style.display = 'none';
+            document.getElementById('error').style.display = 'none';
+            document.getElementById('media-display').style.display = 'block';
+
+            const title = record.fields.title?.value || record.fields.fileName?.value || 'Untitled';
+            const mediaType = record.fields.mediaType?.value || 'image';
+            const viewCount = record.fields.viewCount?.value || 0;
+            const collection = record.fields.collection?.value;
+            const assetUrl = record.fields.imageAsset?.value?.downloadURL;
+
+            // Update UI
+            document.getElementById('media-title').textContent = title;
+            document.getElementById('view-count').innerHTML = `&#128065; ${viewCount} views`;
+            document.getElementById('media-type').textContent = mediaType.charAt(0).toUpperCase() + mediaType.slice(1);
+
+            if (collection) {
+                document.getElementById('collection-badge').style.display = 'inline-flex';
+                document.getElementById('collection-name').textContent = collection;
+            }
+
+            // Display content based on type
+            const contentDiv = document.getElementById('media-content');
+            const downloadBtn = document.getElementById('download-btn');
+
+            if (assetUrl) {
+                downloadBtn.href = assetUrl;
+                downloadBtn.download = title;
+
+                switch (mediaType) {
+                    case 'image':
+                        contentDiv.innerHTML = `<img src="${assetUrl}" alt="${title}" />`;
+                        break;
+                    case 'gif':
+                        contentDiv.innerHTML = `<img src="${assetUrl}" alt="${title}" />`;
+                        break;
+                    case 'video':
+                        contentDiv.innerHTML = `<video controls autoplay><source src="${assetUrl}" type="video/mp4">Your browser does not support video.</video>`;
+                        break;
+                    case 'audio':
+                        contentDiv.innerHTML = `<div style="padding: 40px; text-align: center;"><div style="font-size: 64px; margin-bottom: 20px;">&#127911;</div><audio controls autoplay><source src="${assetUrl}" type="audio/mp4">Your browser does not support audio.</audio></div>`;
+                        break;
+                    case 'pdf':
+                        contentDiv.innerHTML = `<iframe src="${assetUrl}" style="width: 100%; height: 60vh; border: none;"></iframe>`;
+                        break;
+                    case 'text':
+                        fetch(assetUrl)
+                            .then(r => r.text())
+                            .then(text => {
+                                contentDiv.innerHTML = `<div class="text-viewer"><pre>${escapeHtml(text)}</pre></div>`;
+                            });
+                        break;
+                    default:
+                        contentDiv.innerHTML = `<div style="padding: 60px; text-align: center;"><div style="font-size: 64px; margin-bottom: 20px;">&#128196;</div><p>Preview not available. Click download to get the file.</p></div>`;
+                }
+            } else {
+                contentDiv.innerHTML = `<div style="padding: 60px; text-align: center;"><p>Content not available</p></div>`;
+                downloadBtn.style.display = 'none';
+            }
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // Increment view count
+        async function incrementViewCount(recordName) {
+            // This would require a server-side function or CloudKit Web Services API
+            // For now, we'll skip this and just display the current count
+            console.log('View count increment would happen here for:', recordName);
+        }
+
+        // Initialize CloudKit and fetch record
+        async function init() {
+            const shareId = getShareId();
+
+            if (!shareId) {
+                showError('No share ID provided. Please check the URL.');
+                return;
+            }
+
+            try {
+                // Configure CloudKit
+                CloudKit.configure({
+                    containers: [{
+                        containerIdentifier: CONTAINER_ID,
+                        apiTokenAuth: {
+                            apiToken: API_TOKEN,
+                            persist: false
+                        },
+                        environment: ENVIRONMENT
+                    }]
+                });
+
+                const container = CloudKit.getDefaultContainer();
+                const publicDB = container.publicCloudDatabase;
+
+                // Fetch the record
+                const response = await publicDB.fetchRecords([{
+                    recordName: shareId,
+                    recordType: 'SharedImage'
+                }]);
+
+                if (response.records && response.records.length > 0) {
+                    currentRecord = response.records[0];
+
+                    // Check for password
+                    storedPasswordHash = currentRecord.fields.passwordHash?.value;
+
+                    if (storedPasswordHash) {
+                        showPasswordForm();
+                    } else {
+                        // Increment view count
+                        incrementViewCount(shareId);
+                        displayMedia(currentRecord);
+                    }
+                } else {
+                    showError('Content not found or has been deleted.');
+                }
+            } catch (error) {
+                console.error('CloudKit error:', error);
+                showError('Failed to load content. Please try again later.');
+            }
+        }
+
+        // Start the app
+        document.addEventListener('DOMContentLoaded', init);
+    </script>
+</body>
+</html>
