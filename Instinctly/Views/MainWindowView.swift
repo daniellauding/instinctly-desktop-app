@@ -1,5 +1,6 @@
 import SwiftUI
 import ScreenCaptureKit
+import AVFoundation
 
 struct MainWindowView: View {
     @EnvironmentObject private var appState: AppState
@@ -57,7 +58,15 @@ struct MainWindowView: View {
                     SidebarRecordButton(title: "Record Region", icon: "rectangle.dashed.badge.record", mode: .region)
                     SidebarRecordButton(title: "Record Window", icon: "macwindow.badge.plus", mode: .window)
                     SidebarRecordButton(title: "Record Full Screen", icon: "rectangle.inset.filled.badge.record", mode: .fullScreen)
+                    SidebarRecordButton(title: "Record GIF", icon: "photo.stack", mode: .region, forceGif: true)
+                    SidebarRecordButton(title: "Record with Webcam", icon: "video.fill", mode: .region, withWebcam: true)
                     SidebarRecordButton(title: "Voice Only", icon: "mic.fill", mode: .voiceOnly)
+                }
+
+                Section("Recent") {
+                    NavigationLink(value: "Recent") {
+                        Label("Recent Files", systemImage: "clock")
+                    }
                 }
 
                 Section("Library") {
@@ -137,8 +146,12 @@ struct MainWindowView: View {
                 // Show editor if image is loaded
                 ImageEditorView(imageId: nil)
             } else if let collection = selectedCollection {
-                // Show library items for selected collection
-                LibraryGridView(collection: collection, libraryService: libraryService, appState: appState)
+                // Show library items for selected collection or recent files
+                if collection == "Recent" {
+                    RecentFilesGridView(appState: appState)
+                } else {
+                    LibraryGridView(collection: collection, libraryService: libraryService, appState: appState)
+                }
             } else {
                 // Welcome/empty state
                 WelcomeView(
@@ -198,6 +211,7 @@ struct MainWindowView: View {
             selectedCollection = nil
         }
     }
+    
 
     // MARK: - Actions
 
@@ -383,11 +397,16 @@ struct SidebarRecordButton: View {
     let title: String
     let icon: String
     let mode: RecordingConfiguration.CaptureMode
+    var forceGif: Bool = false
+    var withWebcam: Bool = false
 
     @StateObject private var recordingService = ScreenRecordingService.shared
 
     private var isThisModeRecording: Bool {
-        recordingService.state.isRecording && recordingService.configuration.captureMode == mode
+        recordingService.state.isRecording && 
+        recordingService.configuration.captureMode == mode &&
+        (forceGif ? recordingService.configuration.outputFormat == .gif : true) &&
+        (withWebcam ? recordingService.configuration.enableWebcam : true)
     }
 
     var body: some View {
@@ -412,7 +431,15 @@ struct SidebarRecordButton: View {
         if isThisModeRecording {
             // Stop recording
             Task {
-                _ = try? await recordingService.stopRecording()
+                do {
+                    let url = try await recordingService.stopRecording()
+                    // Save to library and show
+                    await MainActor.run {
+                        showRecordingResult(url: url)
+                    }
+                } catch {
+                    print("❌ Failed to stop recording: \(error)")
+                }
             }
         } else {
             // Start recording
@@ -422,7 +449,34 @@ struct SidebarRecordButton: View {
 
     private func startRecording() {
         recordingService.configuration.captureMode = mode
+        
+        // Force GIF format if this is the GIF button
+        if forceGif {
+            recordingService.configuration.outputFormat = .gif
+        }
+        
+        // Enable webcam if this is the webcam button
+        if withWebcam {
+            recordingService.configuration.enableWebcam = true
+            // Check camera permission
+            Task {
+                let hasPermission = await CameraPermission.checkAndRequest()
+                if !hasPermission {
+                    print("❌ Camera permission denied")
+                    return
+                }
+                // Continue with recording after permission granted
+                await MainActor.run {
+                    continueStartRecording()
+                }
+            }
+            return
+        }
 
+        continueStartRecording()
+    }
+    
+    private func continueStartRecording() {
         switch mode {
         case .region:
             Task { @MainActor in
@@ -466,6 +520,43 @@ struct SidebarRecordButton: View {
         let minutes = Int(time) / 60
         let seconds = Int(time) % 60
         return String(format: "%d:%02d", minutes, seconds)
+    }
+    
+    private func showRecordingResult(url: URL) {
+        do {
+            // Determine the type from file extension
+            let ext = url.pathExtension.lowercased()
+            let itemType: LibraryItem.ItemType
+            switch ext {
+            case "gif":
+                itemType = .gif
+            case "m4a":
+                itemType = .voiceRecording
+            default:
+                itemType = .recording
+            }
+            
+            // Save to library
+            let fileName = url.lastPathComponent
+            let name = fileName.replacingOccurrences(of: ".\(ext)", with: "")
+            let item = try LibraryService.shared.saveRecording(from: url, type: itemType, name: name, collection: "Recordings")
+            
+            // Show notification that it was saved
+            let notification = NSUserNotification()
+            notification.title = "Recording Saved"
+            notification.informativeText = "'\(name)' was saved to your library"
+            notification.soundName = NSUserNotificationDefaultSoundName
+            NSUserNotificationCenter.default.deliver(notification)
+            
+            // Open the file in default app (QuickTime for videos, Preview for GIFs)
+            NSWorkspace.shared.open(url)
+            
+            print("✅ Recording saved to library: \(item.name)")
+        } catch {
+            print("❌ Failed to save recording to library: \(error)")
+            // Still try to open the file
+            NSWorkspace.shared.open(url)
+        }
     }
 }
 
@@ -583,6 +674,436 @@ struct LibraryGridView: View {
     }
 }
 
+// MARK: - Recent Files Grid View
+struct RecentFilesGridView: View {
+    @ObservedObject var appState: AppState
+    
+    @State private var recentFiles: [URL] = []
+    @State private var searchText = ""
+    
+    private let columns = [GridItem(.adaptive(minimum: 150, maximum: 200), spacing: 16)]
+    
+    private var filteredFiles: [URL] {
+        var files = recentFiles
+        if !searchText.isEmpty {
+            files = files.filter { $0.lastPathComponent.localizedCaseInsensitiveContains(searchText) }
+        }
+        return files.sorted { $0.lastPathComponent > $1.lastPathComponent }
+    }
+    
+    var body: some View {
+        VStack(spacing: 0) {
+            // Search bar
+            HStack {
+                Image(systemName: "magnifyingglass")
+                    .foregroundColor(.secondary)
+                TextField("Search recent files...", text: $searchText)
+                    .textFieldStyle(.plain)
+                if !searchText.isEmpty {
+                    Button(action: { searchText = "" }) {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(8)
+            .background(Color.primary.opacity(0.05))
+            .cornerRadius(8)
+            .padding()
+            
+            Divider()
+            
+            if filteredFiles.isEmpty {
+                // Empty state
+                VStack(spacing: 16) {
+                    Spacer()
+                    Image(systemName: "clock")
+                        .font(.system(size: 64))
+                        .foregroundColor(.secondary.opacity(0.5))
+                    Text("No Recent Files")
+                        .font(.title2)
+                        .foregroundColor(.secondary)
+                    Text("Recent recordings and captures will appear here")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                // Grid of files
+                ScrollView {
+                    LazyVGrid(columns: columns, spacing: 16) {
+                        ForEach(filteredFiles, id: \.self) { fileURL in
+                            RecentFileCard(fileURL: fileURL, appState: appState)
+                        }
+                    }
+                    .padding(16)
+                }
+            }
+        }
+        .onAppear {
+            loadRecentFiles()
+        }
+        .refreshable {
+            loadRecentFiles()
+        }
+    }
+    
+    private func loadRecentFiles() {
+        let tempDir = FileManager.default.temporaryDirectory
+        
+        do {
+            let allFiles = try FileManager.default.contentsOfDirectory(at: tempDir, includingPropertiesForKeys: [.contentModificationDateKey])
+            
+            // Filter for media files
+            recentFiles = allFiles.filter { url in
+                let ext = url.pathExtension.lowercased()
+                return ["gif", "mp4", "mov", "webm", "m4a", "png", "jpg", "jpeg"].contains(ext)
+            }.filter { url in
+                url.lastPathComponent.hasPrefix("Instinctly_")
+            }
+        } catch {
+            print("❌ Failed to load recent files: \(error)")
+            recentFiles = []
+        }
+    }
+}
+
+// MARK: - Recent File Card
+struct RecentFileCard: View {
+    let fileURL: URL
+    @ObservedObject var appState: AppState
+    
+    @State private var isHovered = false
+    @State private var fileSize: String = ""
+    @State private var thumbnail: NSImage?
+    @State private var showPreview = false
+    @StateObject private var shareService = ShareService.shared
+    
+    private var fileType: String {
+        let ext = fileURL.pathExtension.lowercased()
+        switch ext {
+        case "gif": return "GIF"
+        case "mp4", "mov", "webm": return "Video"
+        case "m4a": return "Audio"
+        case "png", "jpg", "jpeg": return "Image"
+        default: return "File"
+        }
+    }
+    
+    private var iconName: String {
+        let ext = fileURL.pathExtension.lowercased()
+        switch ext {
+        case "gif": return "photo.stack"
+        case "mp4", "mov", "webm": return "video.fill"
+        case "m4a": return "waveform"
+        case "png", "jpg", "jpeg": return "photo"
+        default: return "doc.fill"
+        }
+    }
+    
+    private var iconColor: Color {
+        let ext = fileURL.pathExtension.lowercased()
+        switch ext {
+        case "gif": return .orange
+        case "mp4", "mov", "webm": return .blue
+        case "m4a": return .green
+        case "png", "jpg", "jpeg": return .purple
+        default: return .gray
+        }
+    }
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            // File thumbnail or icon
+            ZStack {
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color.gray.opacity(0.1))
+                    .aspectRatio(16/10, contentMode: .fit)
+                
+                if let thumbnail = thumbnail {
+                    Image(nsImage: thumbnail)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .clipped()
+                        .cornerRadius(8)
+                        .overlay(
+                            // File type badge
+                            VStack {
+                                Spacer()
+                                HStack {
+                                    Spacer()
+                                    Text(fileType)
+                                        .font(.caption2)
+                                        .fontWeight(.medium)
+                                        .foregroundColor(.white)
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 2)
+                                        .background(iconColor.opacity(0.8))
+                                        .cornerRadius(4)
+                                        .padding(4)
+                                }
+                            }
+                        )
+                } else {
+                    VStack(spacing: 8) {
+                        Image(systemName: iconName)
+                            .font(.system(size: 32))
+                            .foregroundColor(iconColor)
+                        
+                        Text(fileType)
+                            .font(.caption)
+                            .fontWeight(.medium)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                
+                if isHovered {
+                    Color.black.opacity(0.4)
+                        .cornerRadius(8)
+                    
+                    VStack(spacing: 8) {
+                        // Open button
+                        Button(action: openFile) {
+                            Label("Open", systemImage: "arrow.up.right.square")
+                                .padding(8)
+                                .background(.ultraThinMaterial)
+                                .cornerRadius(6)
+                        }
+                        .buttonStyle(.plain)
+                        
+                        HStack(spacing: 8) {
+                            // Share to iCloud
+                            Button(action: shareToCloud) {
+                                if shareService.isSharing {
+                                    ProgressView()
+                                        .scaleEffect(0.5)
+                                        .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                                        .padding(6)
+                                        .background(.ultraThinMaterial)
+                                        .clipShape(Circle())
+                                } else {
+                                    Image(systemName: "link.badge.plus")
+                                        .foregroundColor(.white)
+                                        .padding(6)
+                                        .background(.ultraThinMaterial)
+                                        .clipShape(Circle())
+                                }
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(shareService.isSharing)
+                            
+                            // Copy to clipboard
+                            Button(action: copyPath) {
+                                Image(systemName: "doc.on.clipboard")
+                                    .foregroundColor(.white)
+                                    .padding(6)
+                                    .background(.ultraThinMaterial)
+                                    .clipShape(Circle())
+                            }
+                            .buttonStyle(.plain)
+                            
+                            // Show in Finder
+                            Button(action: showInFinder) {
+                                Image(systemName: "folder")
+                                    .padding(6)
+                                    .background(.ultraThinMaterial)
+                                    .clipShape(Circle())
+                            }
+                            .buttonStyle(.plain)
+                            
+                            // Save to Library
+                            Button(action: saveToLibrary) {
+                                Image(systemName: "square.and.arrow.down")
+                                    .foregroundColor(.blue)
+                                    .padding(6)
+                                    .background(.ultraThinMaterial)
+                                    .clipShape(Circle())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+            }
+            .onHover { hovering in
+                withAnimation(.easeInOut(duration: 0.15)) {
+                    isHovered = hovering
+                }
+            }
+            .onTapGesture {
+                showPreview = true
+            }
+            .onTapGesture(count: 2) {
+                openFile()
+            }
+            
+            // File info
+            VStack(alignment: .leading, spacing: 2) {
+                Text(fileURL.lastPathComponent)
+                    .font(.caption)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                
+                HStack {
+                    Text(fileSize)
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                    
+                    Spacer()
+                    
+                    Text(formatDate())
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+            }
+        }
+        .onAppear {
+            loadFileSize()
+            loadThumbnail()
+        }
+        .sheet(isPresented: $showPreview) {
+            FilePreviewPanel(fileURL: fileURL, isPresented: $showPreview)
+        }
+    }
+    
+    private func openFile() {
+        NSWorkspace.shared.open(fileURL)
+    }
+    
+    private func shareToCloud() {
+        Task {
+            do {
+                let shareURL = try await shareService.uploadFileAndGetShareableLink(fileURL: fileURL)
+                await MainActor.run {
+                    print("✅ Recent file shared to iCloud: \(shareURL.absoluteString)")
+                }
+            } catch {
+                await MainActor.run {
+                    print("❌ Failed to share recent file: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+    
+    private func copyPath() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(fileURL.path, forType: .string)
+    }
+    
+    private func showInFinder() {
+        NSWorkspace.shared.selectFile(fileURL.path, inFileViewerRootedAtPath: "")
+    }
+    
+    private func saveToLibrary() {
+        do {
+            let ext = fileURL.pathExtension.lowercased()
+            let itemType: LibraryItem.ItemType
+            switch ext {
+            case "gif":
+                itemType = .gif
+            case "m4a":
+                itemType = .voiceRecording
+            case "mp4", "mov", "webm":
+                itemType = .recording
+            default:
+                itemType = .screenshot
+            }
+            
+            let fileName = fileURL.lastPathComponent
+            let name = fileName.replacingOccurrences(of: ".\(ext)", with: "")
+            _ = try LibraryService.shared.saveRecording(from: fileURL, type: itemType, name: name, collection: "Recordings")
+            
+            // Show notification
+            let notification = NSUserNotification()
+            notification.title = "Saved to Library"
+            notification.informativeText = "'\(name)' was added to your library"
+            notification.soundName = NSUserNotificationDefaultSoundName
+            NSUserNotificationCenter.default.deliver(notification)
+            
+            print("✅ Saved to library: \(name)")
+        } catch {
+            print("❌ Failed to save to library: \(error)")
+        }
+    }
+    
+    private func loadFileSize() {
+        do {
+            let attributes = try FileManager.default.attributesOfItem(atPath: fileURL.path)
+            if let size = attributes[.size] as? Int64 {
+                let formatter = ByteCountFormatter()
+                formatter.countStyle = .file
+                fileSize = formatter.string(fromByteCount: size)
+            }
+        } catch {
+            fileSize = "—"
+        }
+    }
+    
+    private func formatDate() -> String {
+        do {
+            let attributes = try FileManager.default.attributesOfItem(atPath: fileURL.path)
+            if let date = attributes[.modificationDate] as? Date {
+                let formatter = DateFormatter()
+                formatter.dateStyle = .short
+                formatter.timeStyle = .short
+                return formatter.string(from: date)
+            }
+        } catch {}
+        return "—"
+    }
+    
+    private func loadThumbnail() {
+        Task {
+            let thumb = await generateThumbnail(for: fileURL)
+            await MainActor.run {
+                thumbnail = thumb
+            }
+        }
+    }
+    
+    private func generateThumbnail(for url: URL) async -> NSImage? {
+        let ext = url.pathExtension.lowercased()
+        
+        switch ext {
+        case "png", "jpg", "jpeg", "gif":
+            // For images and GIFs, load directly
+            return NSImage(contentsOf: url)
+            
+        case "mp4", "mov", "webm":
+            // For videos, generate thumbnail from first frame
+            return await generateVideoThumbnail(for: url)
+            
+        case "m4a":
+            // For audio, return nil to show icon
+            return nil
+            
+        default:
+            return nil
+        }
+    }
+    
+    private func generateVideoThumbnail(for url: URL) async -> NSImage? {
+        return await withCheckedContinuation { continuation in
+            let asset = AVAsset(url: url)
+            let imageGenerator = AVAssetImageGenerator(asset: asset)
+            imageGenerator.appliesPreferredTrackTransform = true
+            imageGenerator.maximumSize = CGSize(width: 300, height: 200)
+            
+            let time = CMTime(seconds: 1.0, preferredTimescale: 1000)
+            
+            imageGenerator.generateCGImagesAsynchronously(forTimes: [NSValue(time: time)]) { _, cgImage, _, _, error in
+                if let cgImage = cgImage {
+                    let nsImage = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+                    continuation.resume(returning: nsImage)
+                } else {
+                    continuation.resume(returning: nil)
+                }
+            }
+        }
+    }
+}
+
 // MARK: - Library Item Card
 struct LibraryItemCard: View {
     let item: LibraryItem
@@ -591,6 +1112,8 @@ struct LibraryItemCard: View {
 
     @State private var isHovered = false
     @State private var thumbnail: NSImage?
+    @State private var showPreview = false
+    @StateObject private var shareService = ShareService.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -606,6 +1129,24 @@ struct LibraryItemCard: View {
                         .aspectRatio(contentMode: .fill)
                         .clipped()
                         .cornerRadius(8)
+                        .overlay(
+                            // File type badge for library items too
+                            VStack {
+                                Spacer()
+                                HStack {
+                                    Spacer()
+                                    Text(item.type.rawValue.uppercased())
+                                        .font(.caption2)
+                                        .fontWeight(.medium)
+                                        .foregroundColor(.white)
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 2)
+                                        .background(badgeColor.opacity(0.8))
+                                        .cornerRadius(4)
+                                        .padding(4)
+                                }
+                            }
+                        )
                 } else {
                     Image(systemName: iconForType)
                         .font(.system(size: 32))
@@ -627,6 +1168,26 @@ struct LibraryItemCard: View {
                         .buttonStyle(.plain)
 
                         HStack(spacing: 8) {
+                            // Share to iCloud
+                            Button(action: shareToCloud) {
+                                if shareService.isSharing {
+                                    ProgressView()
+                                        .scaleEffect(0.5)
+                                        .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                                        .padding(6)
+                                        .background(.ultraThinMaterial)
+                                        .clipShape(Circle())
+                                } else {
+                                    Image(systemName: "link.badge.plus")
+                                        .foregroundColor(.white)
+                                        .padding(6)
+                                        .background(.ultraThinMaterial)
+                                        .clipShape(Circle())
+                                }
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(shareService.isSharing)
+                            
                             // Favorite
                             Button(action: { libraryService.toggleFavorite(item) }) {
                                 Image(systemName: item.isFavorite ? "star.fill" : "star")
@@ -664,6 +1225,9 @@ struct LibraryItemCard: View {
                     isHovered = hovering
                 }
             }
+            .onTapGesture {
+                showPreview = true
+            }
             .onTapGesture(count: 2) {
                 openInEditor()
             }
@@ -688,6 +1252,11 @@ struct LibraryItemCard: View {
         .onAppear {
             loadThumbnail()
         }
+        .sheet(isPresented: $showPreview) {
+            if let url = item.url {
+                FilePreviewPanel(fileURL: url, isPresented: $showPreview)
+            }
+        }
     }
 
     private var iconForType: String {
@@ -696,6 +1265,15 @@ struct LibraryItemCard: View {
         case .recording: return "video"
         case .gif: return "photo.stack"
         case .voiceRecording: return "waveform"
+        }
+    }
+    
+    private var badgeColor: Color {
+        switch item.type {
+        case .screenshot: return .purple
+        case .recording: return .blue
+        case .gif: return .orange
+        case .voiceRecording: return .green
         }
     }
 
@@ -707,11 +1285,67 @@ struct LibraryItemCard: View {
     }
 
     private func loadThumbnail() {
-        if item.type == .screenshot {
-            thumbnail = libraryService.loadImage(for: item)
+        Task {
+            let thumb = await generateLibraryThumbnail(for: item)
+            await MainActor.run {
+                thumbnail = thumb
+            }
+        }
+    }
+    
+    private func generateLibraryThumbnail(for item: LibraryItem) async -> NSImage? {
+        switch item.type {
+        case .screenshot, .gif:
+            // For images and GIFs, load directly from library
+            return libraryService.loadImage(for: item)
+            
+        case .recording:
+            // For videos, try to load from library and generate thumbnail
+            let fileURL = libraryService.fileURL(for: item)
+            return await generateVideoThumbnailFromURL(fileURL)
+            
+        case .voiceRecording:
+            // For audio, return nil to show icon
+            return nil
+        }
+    }
+    
+    private func generateVideoThumbnailFromURL(_ url: URL) async -> NSImage? {
+        return await withCheckedContinuation { continuation in
+            let asset = AVAsset(url: url)
+            let imageGenerator = AVAssetImageGenerator(asset: asset)
+            imageGenerator.appliesPreferredTrackTransform = true
+            imageGenerator.maximumSize = CGSize(width: 300, height: 200)
+            
+            let time = CMTime(seconds: 1.0, preferredTimescale: 1000)
+            
+            imageGenerator.generateCGImagesAsynchronously(forTimes: [NSValue(time: time)]) { _, cgImage, _, _, error in
+                if let cgImage = cgImage {
+                    let nsImage = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+                    continuation.resume(returning: nsImage)
+                } else {
+                    continuation.resume(returning: nil)
+                }
+            }
         }
     }
 
+    private func shareToCloud() {
+        Task {
+            do {
+                let url = libraryService.fileURL(for: item)
+                let shareURL = try await shareService.uploadFileAndGetShareableLink(fileURL: url)
+                await MainActor.run {
+                    print("✅ Library item shared to iCloud: \(shareURL.absoluteString)")
+                }
+            } catch {
+                await MainActor.run {
+                    print("❌ Failed to share library item: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+    
     private func openInEditor() {
         if item.type == .screenshot, let image = libraryService.loadImage(for: item) {
             appState.currentImage = image

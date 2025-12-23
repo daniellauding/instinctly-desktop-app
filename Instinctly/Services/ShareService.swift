@@ -139,10 +139,11 @@ class ShareService: ObservableObject {
 
         // Create CloudKit record
         let recordID = CKRecord.ID(recordName: shareId)
-        let record = CKRecord(recordType: "SharedImage", recordID: recordID)
+        let record = CKRecord(recordType: "SharedMedia", recordID: recordID)
         record["title"] = title
         record["createdAt"] = Date()
-        record["imageAsset"] = CKAsset(fileURL: tempURL)
+        record["mediaType"] = "image"
+        record["mediaAsset"] = CKAsset(fileURL: tempURL)
 
         // Store annotations as JSON
         if !annotations.isEmpty {
@@ -180,6 +181,75 @@ class ShareService: ObservableObject {
         }
     }
 
+    /// Upload file to CloudKit public database and get a shareable link
+    func uploadFileAndGetShareableLink(
+        fileURL: URL,
+        title: String? = nil
+    ) async throws -> URL {
+        shareLogger.info("☁️ Uploading file to CloudKit for sharing: \(fileURL.lastPathComponent)")
+        
+        // Check CloudKit availability first
+        guard isCloudKitAvailable else {
+            shareLogger.error("❌ CloudKit not available - cannot upload")
+            throw ShareError.notAuthenticated
+        }
+        
+        isSharing = true
+        shareError = nil
+        
+        defer { isSharing = false }
+        
+        // Determine media type from file extension
+        let ext = fileURL.pathExtension.lowercased()
+        let mediaType: String
+        switch ext {
+        case "gif":
+            mediaType = "gif"
+        case "mp4", "mov", "webm":
+            mediaType = "video"
+        case "m4a", "wav":
+            mediaType = "audio"
+        case "png", "jpg", "jpeg":
+            mediaType = "image"
+        default:
+            mediaType = "file"
+        }
+        
+        // Create a unique share ID
+        let shareId = UUID().uuidString
+        
+        // Create CloudKit record
+        let recordID = CKRecord.ID(recordName: shareId)
+        let record = CKRecord(recordType: "SharedMedia", recordID: recordID)
+        record["title"] = title ?? fileURL.lastPathComponent
+        record["createdAt"] = Date()
+        record["mediaType"] = mediaType
+        record["fileName"] = fileURL.lastPathComponent
+        record["mediaAsset"] = CKAsset(fileURL: fileURL)
+        
+        // Upload to public database
+        do {
+            let savedRecord = try await publicDatabase.save(record)
+            shareLogger.info("✅ Record saved: \(savedRecord.recordID.recordName)")
+            
+            // Generate shareable URL - Web viewer format
+            let shareURL = URL(string: "\(webViewerBaseURL)?id=\(shareId)")!
+            
+            // Also store app URL for direct app opening
+            let appURL = URL(string: "instinctly://share/\(shareId)")!
+            shareLogger.info("🌐 Web URL: \(shareURL.absoluteString)")
+            shareLogger.info("📱 App URL: \(appURL.absoluteString)")
+            
+            lastSharedURL = shareURL
+            
+            return shareURL
+        } catch {
+            shareLogger.error("❌ CloudKit upload failed: \(error.localizedDescription)")
+            shareError = error
+            throw error
+        }
+    }
+
     // MARK: - Fetch Shared Image
 
     /// Fetch a shared image by its share ID
@@ -191,7 +261,7 @@ class ShareService: ObservableObject {
         do {
             let record = try await publicDatabase.record(for: recordID)
 
-            guard let asset = record["imageAsset"] as? CKAsset,
+            guard let asset = record["mediaAsset"] as? CKAsset,
                   let fileURL = asset.fileURL,
                   let image = NSImage(contentsOf: fileURL) else {
                 throw ShareError.imageNotFound
@@ -207,6 +277,30 @@ class ShareService: ObservableObject {
             return (image, annotations)
         } catch {
             shareLogger.error("❌ Failed to fetch shared image: \(error.localizedDescription)")
+            throw error
+        }
+    }
+    
+    /// Fetch shared media by its share ID
+    func fetchSharedMedia(shareId: String) async throws -> (fileURL: URL, mediaType: String, fileName: String) {
+        shareLogger.info("📥 Fetching shared media: \(shareId)")
+        
+        let recordID = CKRecord.ID(recordName: shareId)
+        
+        do {
+            let record = try await publicDatabase.record(for: recordID)
+            
+            guard let asset = record["mediaAsset"] as? CKAsset,
+                  let fileURL = asset.fileURL,
+                  let mediaType = record["mediaType"] as? String,
+                  let fileName = record["fileName"] as? String else {
+                throw ShareError.imageNotFound
+            }
+            
+            shareLogger.info("✅ Fetched shared media: \(fileName)")
+            return (fileURL, mediaType, fileName)
+        } catch {
+            shareLogger.error("❌ Failed to fetch shared media: \(error.localizedDescription)")
             throw error
         }
     }

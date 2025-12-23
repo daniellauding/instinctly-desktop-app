@@ -83,6 +83,13 @@ struct MenuBarView: View {
                 )
 
                 RecordingMenuButton(
+                    title: "Record GIF",
+                    icon: "photo.stack",
+                    mode: .region,
+                    forceGif: true
+                )
+
+                RecordingMenuButton(
                     title: "Voice Only",
                     icon: "mic.fill",
                     mode: .voiceOnly
@@ -153,6 +160,7 @@ struct MenuBarView: View {
     private var recentCaptures: [String] {
         [] // Will be populated from Core Data
     }
+
 
     // MARK: - Actions
 
@@ -287,6 +295,8 @@ struct RecordingMenuButton: View {
     let title: String
     let icon: String
     let mode: RecordingConfiguration.CaptureMode
+    var forceGif: Bool = false
+    var withWebcam: Bool = false
 
     @StateObject private var recordingService = ScreenRecordingService.shared
     @State private var isHovered = false
@@ -324,13 +334,39 @@ struct RecordingMenuButton: View {
         // If already recording this mode, stop it
         if recordingService.state.isRecording {
             Task {
-                _ = try? await recordingService.stopRecording()
+                do {
+                    let url = try await recordingService.stopRecording()
+                    // Save to library and show
+                    await MainActor.run {
+                        showRecordingResult(url: url)
+                    }
+                } catch {
+                    print("❌ Failed to stop recording: \(error)")
+                }
             }
             return
         }
 
         // Set mode and start
         recordingService.configuration.captureMode = mode
+        
+        // Force GIF format if this is the GIF button
+        if forceGif {
+            recordingService.configuration.outputFormat = .gif
+        }
+        
+        // Enable webcam if this is the webcam button
+        if withWebcam {
+            recordingService.configuration.enableWebcam = true
+            // Check camera permission
+            Task {
+                let hasPermission = await CameraPermission.checkAndRequest()
+                if !hasPermission {
+                    print("❌ Camera permission denied")
+                    return
+                }
+            }
+        }
 
         switch mode {
         case .region:
@@ -349,6 +385,8 @@ struct RecordingMenuButton: View {
                     }
                 } else {
                     print("⚠️ MenuBar: Region selection cancelled")
+                    // Reset recording service state
+                    recordingService.resetToIdle()
                 }
             }
 
@@ -381,6 +419,43 @@ struct RecordingMenuButton: View {
         let minutes = Int(time) / 60
         let seconds = Int(time) % 60
         return String(format: "%d:%02d", minutes, seconds)
+    }
+    
+    private func showRecordingResult(url: URL) {
+        do {
+            // Determine the type from file extension
+            let ext = url.pathExtension.lowercased()
+            let itemType: LibraryItem.ItemType
+            switch ext {
+            case "gif":
+                itemType = .gif
+            case "m4a":
+                itemType = .voiceRecording
+            default:
+                itemType = .recording
+            }
+            
+            // Save to library
+            let fileName = url.lastPathComponent
+            let name = fileName.replacingOccurrences(of: ".\(ext)", with: "")
+            let item = try LibraryService.shared.saveRecording(from: url, type: itemType, name: name, collection: "Recordings")
+            
+            // Show notification that it was saved
+            let notification = NSUserNotification()
+            notification.title = "Recording Saved"
+            notification.informativeText = "'\(name)' was saved to your library"
+            notification.soundName = NSUserNotificationDefaultSoundName
+            NSUserNotificationCenter.default.deliver(notification)
+            
+            // Open the file in default app (QuickTime for videos, Preview for GIFs)
+            NSWorkspace.shared.open(url)
+            
+            print("✅ Recording saved to library: \(item.name)")
+        } catch {
+            print("❌ Failed to save recording to library: \(error)")
+            // Still try to open the file
+            NSWorkspace.shared.open(url)
+        }
     }
 }
 

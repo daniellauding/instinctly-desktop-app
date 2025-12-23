@@ -192,13 +192,20 @@ class ScreenRecordingService: NSObject, ObservableObject {
     /// Start recording with current configuration
     func startRecording() async throws {
         guard state == .idle else {
-            recordLogger.warning("⚠️ Cannot start: already recording")
-            return
+            recordLogger.warning("⚠️ Cannot start: already recording. Current state: \(String(describing: self.state))")
+            throw RecordingError.alreadyRecording
         }
 
         // Handle voice-only recording separately
         if configuration.captureMode == .voiceOnly {
             try await startVoiceOnlyRecording()
+            return
+        }
+        
+        // Check screen recording permission first
+        if await !ScreenRecordingPermission.hasPermission() {
+            ScreenRecordingPermission.requestPermission()
+            state = .error("Screen recording permission required. Please grant permission in System Settings and try again.")
             return
         }
 
@@ -237,7 +244,10 @@ class ScreenRecordingService: NSObject, ObservableObject {
                 captureRegion = region
                 displayScaleFactor = NSScreen.main?.backingScaleFactor ?? 2.0
                 recordLogger.info("📐 Recording region: \(region.debugDescription), scale: \(self.displayScaleFactor)")
-                filter = SCContentFilter(display: display, excludingWindows: [])
+                
+                // For region recording, we capture the full display and crop in post
+                // This ensures we capture all content including windows
+                filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
 
             case .voiceOnly:
                 // Handled above
@@ -337,6 +347,19 @@ class ScreenRecordingService: NSObject, ObservableObject {
         startTimer()
         state = .recording(duration: elapsedTime)
         recordLogger.info("▶️ Recording resumed")
+    }
+    
+    /// Reset recording service to idle state (for error recovery)
+    func resetToIdle() {
+        timer?.invalidate()
+        timer = nil
+        stream = nil
+        assetWriter = nil
+        videoInput = nil
+        audioInput = nil
+        streamOutput = nil
+        state = .idle
+        recordLogger.info("🔄 Recording service reset to idle")
     }
 
     /// Stop recording and return temp URL for preview (no save dialog)
@@ -574,6 +597,11 @@ class ScreenRecordingService: NSObject, ObservableObject {
         guard case .recording = state else { return }
 
         let timestamp = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        
+        // Log first frame
+        if assetWriter?.status == .writing && videoInput?.isReadyForMoreMediaData == true && CMTimeGetSeconds(timestamp) < 0.1 {
+            recordLogger.info("📹 Processing first video frame at \(CMTimeGetSeconds(timestamp))s")
+        }
 
         if configuration.outputFormat == .gif {
             // Store frame for GIF encoding
@@ -595,6 +623,9 @@ class ScreenRecordingService: NSObject, ObservableObject {
             // Write to video file
             if let videoInput = videoInput, videoInput.isReadyForMoreMediaData {
                 videoInput.append(sampleBuffer)
+                recordLogger.debug("📹 Appended video frame to input")
+            } else {
+                recordLogger.warning("⚠️ Video input not ready or nil. Ready: \(self.videoInput?.isReadyForMoreMediaData ?? false)")
             }
         }
     }
@@ -657,17 +688,49 @@ class ScreenRecordingService: NSObject, ObservableObject {
             }
         }
 
-        assetWriter?.startWriting()
-        assetWriter?.startSession(atSourceTime: .zero)
+        guard let writer = assetWriter else {
+            recordLogger.error("❌ Asset writer is nil!")
+            return
+        }
+        
+        let startResult = writer.startWriting()
+        if !startResult {
+            recordLogger.error("❌ Failed to start writing: \(writer.error?.localizedDescription ?? "Unknown error")")
+            return
+        }
+        
+        writer.startSession(atSourceTime: .zero)
+        recordLogger.info("✅ Asset writer started successfully")
     }
 
     private func finalizeAssetWriter() async {
+        guard let writer = assetWriter else {
+            recordLogger.error("❌ No asset writer to finalize")
+            return
+        }
+        
+        recordLogger.info("🔄 Finalizing asset writer...")
         videoInput?.markAsFinished()
         audioInput?.markAsFinished()
 
-        await withCheckedContinuation { continuation in
-            assetWriter?.finishWriting {
-                continuation.resume()
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let writerStatus = writer.status
+            let writerError = writer.error
+            
+            writer.finishWriting {
+                Task { @MainActor in
+                    switch writer.status {
+                    case .failed:
+                        recordLogger.error("❌ Asset writer failed: \(writerError?.localizedDescription ?? "Unknown error")")
+                    case .completed:
+                        recordLogger.info("✅ Asset writer completed successfully")
+                    case .cancelled:
+                        recordLogger.warning("⚠️ Asset writer was cancelled")
+                    default:
+                        recordLogger.info("✅ Asset writer finalized with status: \(writer.status.rawValue)")
+                    }
+                    continuation.resume()
+                }
             }
         }
 
@@ -858,6 +921,7 @@ enum RecordingError: LocalizedError {
     case gifEncodingFailed
     case videoEncodingFailed
     case audioRecorderFailed
+    case alreadyRecording
 
     var errorDescription: String? {
         switch self {
@@ -870,6 +934,7 @@ enum RecordingError: LocalizedError {
         case .gifEncodingFailed: return "Failed to encode GIF"
         case .videoEncodingFailed: return "Failed to encode video"
         case .audioRecorderFailed: return "Failed to start audio recording"
+        case .alreadyRecording: return "Recording is already in progress"
         }
     }
 }
