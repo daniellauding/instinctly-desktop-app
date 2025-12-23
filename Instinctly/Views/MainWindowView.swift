@@ -851,7 +851,7 @@ struct RecentFilesGridView: View {
 struct SharedLinksGridView: View {
     @ObservedObject var appState: AppState
 
-    @State private var sharedItems: [(recordID: String, title: String, fileName: String, mediaType: String, createdAt: Date, collection: String?)] = []
+    @State private var sharedItems: [(recordID: String, title: String, fileName: String, mediaType: String, createdAt: Date, collection: String?, viewCount: Int, hasPassword: Bool)] = []
     @State private var isLoading = false
     @State private var searchText = ""
     @State private var viewMode: ViewMode = .grid
@@ -879,7 +879,7 @@ struct SharedLinksGridView: View {
 
     private let gridColumns = [GridItem(.adaptive(minimum: 200, maximum: 250), spacing: 16)]
 
-    private var filteredItems: [(recordID: String, title: String, fileName: String, mediaType: String, createdAt: Date, collection: String?)] {
+    private var filteredItems: [(recordID: String, title: String, fileName: String, mediaType: String, createdAt: Date, collection: String?, viewCount: Int, hasPassword: Bool)] {
         if searchText.isEmpty {
             return sharedItems
         }
@@ -1176,10 +1176,7 @@ struct SharedLinksGridView: View {
             do {
                 let items = try await ShareService.shared.fetchAllSharedMedia()
                 await MainActor.run {
-                    // Map to include collection field (nil for now, will be populated from CloudKit)
-                    sharedItems = items.map { item in
-                        (recordID: item.recordID, title: item.title, fileName: item.fileName, mediaType: item.mediaType, createdAt: item.createdAt, collection: item.collection)
-                    }
+                    sharedItems = items
                     isLoading = false
                 }
             } catch {
@@ -1315,7 +1312,7 @@ struct UploadShareSheet: View {
 
 // MARK: - Shared Link List Row (for list view)
 struct SharedLinkListRow: View {
-    let item: (recordID: String, title: String, fileName: String, mediaType: String, createdAt: Date, collection: String?)
+    let item: (recordID: String, title: String, fileName: String, mediaType: String, createdAt: Date, collection: String?, viewCount: Int, hasPassword: Bool)
     let onDelete: () -> Void
 
     @State private var isHovered = false
@@ -1335,14 +1332,39 @@ struct SharedLinkListRow: View {
                 Image(systemName: mediaTypeIcon)
                     .font(.system(size: 18))
                     .foregroundColor(mediaTypeColor)
+
+                // Password indicator badge
+                if item.hasPassword {
+                    VStack {
+                        Spacer()
+                        HStack {
+                            Spacer()
+                            Image(systemName: "lock.fill")
+                                .font(.system(size: 8))
+                                .foregroundColor(.white)
+                                .padding(3)
+                                .background(Color.orange)
+                                .clipShape(Circle())
+                        }
+                    }
+                    .frame(width: 44, height: 44)
+                }
             }
 
             // File info
             VStack(alignment: .leading, spacing: 2) {
-                Text(item.fileName)
-                    .font(.subheadline)
-                    .fontWeight(.medium)
-                    .lineLimit(1)
+                HStack(spacing: 6) {
+                    Text(item.fileName)
+                        .font(.subheadline)
+                        .fontWeight(.medium)
+                        .lineLimit(1)
+
+                    if item.hasPassword {
+                        Image(systemName: "lock.fill")
+                            .font(.caption2)
+                            .foregroundColor(.orange)
+                    }
+                }
 
                 HStack(spacing: 8) {
                     Text(item.mediaType.capitalized)
@@ -1358,6 +1380,15 @@ struct SharedLinkListRow: View {
                         }
                         .foregroundColor(.blue)
                     }
+
+                    // View count
+                    HStack(spacing: 2) {
+                        Image(systemName: "eye")
+                            .font(.caption2)
+                        Text("\(item.viewCount)")
+                            .font(.caption)
+                    }
+                    .foregroundColor(.secondary)
 
                     Text("•")
                         .foregroundColor(.secondary)
@@ -1454,7 +1485,7 @@ struct SharedLinkListRow: View {
 
 // MARK: - Shared Link Card
 struct SharedLinkCard: View {
-    let item: (recordID: String, title: String, fileName: String, mediaType: String, createdAt: Date, collection: String?)
+    let item: (recordID: String, title: String, fileName: String, mediaType: String, createdAt: Date, collection: String?, viewCount: Int, hasPassword: Bool)
     let onDelete: () -> Void
 
     @State private var isHovered = false
@@ -1472,14 +1503,56 @@ struct SharedLinkCard: View {
                     .frame(height: 120)
                     .overlay {
                         VStack(spacing: 8) {
-                            Image(systemName: mediaTypeIcon)
-                                .font(.system(size: 32))
-                                .foregroundColor(mediaTypeColor)
+                            ZStack {
+                                Image(systemName: mediaTypeIcon)
+                                    .font(.system(size: 32))
+                                    .foregroundColor(mediaTypeColor)
+
+                                // Password badge
+                                if item.hasPassword {
+                                    VStack {
+                                        Spacer()
+                                        HStack {
+                                            Spacer()
+                                            Image(systemName: "lock.fill")
+                                                .font(.system(size: 10))
+                                                .foregroundColor(.white)
+                                                .padding(4)
+                                                .background(Color.orange)
+                                                .clipShape(Circle())
+                                        }
+                                    }
+                                    .frame(width: 48, height: 48)
+                                    .offset(x: 10, y: 10)
+                                }
+                            }
+
                             Text(item.mediaType.capitalized)
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }
                     }
+
+                // View count badge (top left)
+                VStack {
+                    HStack {
+                        HStack(spacing: 3) {
+                            Image(systemName: "eye")
+                                .font(.caption2)
+                            Text("\(item.viewCount)")
+                                .font(.caption2)
+                        }
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(.ultraThinMaterial)
+                        .cornerRadius(8)
+                        .padding(6)
+
+                        Spacer()
+                    }
+                    Spacer()
+                }
 
                 // Controls (show on hover)
                 if isHovered {
@@ -1520,10 +1593,18 @@ struct SharedLinkCard: View {
 
             // File info
             VStack(alignment: .leading, spacing: 4) {
-                Text(item.fileName)
-                    .font(.subheadline)
-                    .fontWeight(.medium)
-                    .lineLimit(1)
+                HStack(spacing: 6) {
+                    Text(item.fileName)
+                        .font(.subheadline)
+                        .fontWeight(.medium)
+                        .lineLimit(1)
+
+                    if item.hasPassword {
+                        Image(systemName: "lock.fill")
+                            .font(.caption2)
+                            .foregroundColor(.orange)
+                    }
+                }
 
                 HStack(spacing: 4) {
                     if let collection = item.collection {

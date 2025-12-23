@@ -340,7 +340,7 @@ class ShareService: ObservableObject {
     }
 
     /// Fetch all shared media from CloudKit for management
-    func fetchAllSharedMedia() async throws -> [(recordID: String, title: String, fileName: String, mediaType: String, createdAt: Date, collection: String?)] {
+    func fetchAllSharedMedia() async throws -> [(recordID: String, title: String, fileName: String, mediaType: String, createdAt: Date, collection: String?, viewCount: Int, hasPassword: Bool)] {
         shareLogger.info("📥 Fetching all shared media from CloudKit...")
 
         guard isCloudKitAvailable else {
@@ -356,7 +356,7 @@ class ShareService: ObservableObject {
 
         do {
             let result = try await publicDatabase.records(matching: query)
-            var sharedMedia: [(recordID: String, title: String, fileName: String, mediaType: String, createdAt: Date, collection: String?)] = []
+            var sharedMedia: [(recordID: String, title: String, fileName: String, mediaType: String, createdAt: Date, collection: String?, viewCount: Int, hasPassword: Bool)] = []
 
             for (recordID, recordResult) in result.matchResults {
                 switch recordResult {
@@ -366,6 +366,8 @@ class ShareService: ObservableObject {
                     let mediaType = record["mediaType"] as? String ?? "image"
                     let createdAt = record.creationDate ?? Date()
                     let collection = record["collection"] as? String
+                    let viewCount = record["viewCount"] as? Int ?? 0
+                    let hasPassword = (record["passwordHash"] as? String) != nil
 
                     sharedMedia.append((
                         recordID: recordID.recordName,
@@ -373,7 +375,9 @@ class ShareService: ObservableObject {
                         fileName: fileName,
                         mediaType: mediaType,
                         createdAt: createdAt,
-                        collection: collection
+                        collection: collection,
+                        viewCount: viewCount,
+                        hasPassword: hasPassword
                     ))
                 case .failure(let error):
                     shareLogger.warning("⚠️ Failed to process record \(recordID): \(error)")
@@ -388,6 +392,25 @@ class ShareService: ObservableObject {
         } catch {
             shareLogger.error("❌ Failed to fetch shared media: \(error)")
             throw error
+        }
+    }
+
+    /// Increment view count for a shared item (called from web viewer)
+    func incrementViewCount(shareId: String) async throws {
+        shareLogger.info("👁️ Incrementing view count for: \(shareId)")
+
+        let recordID = CKRecord.ID(recordName: shareId)
+
+        do {
+            let record = try await publicDatabase.record(for: recordID)
+            let currentCount = record["viewCount"] as? Int ?? 0
+            record["viewCount"] = currentCount + 1
+
+            _ = try await publicDatabase.save(record)
+            shareLogger.info("✅ View count incremented to \(currentCount + 1)")
+        } catch {
+            shareLogger.warning("⚠️ Failed to increment view count: \(error)")
+            // Don't throw - view counting is not critical
         }
     }
     

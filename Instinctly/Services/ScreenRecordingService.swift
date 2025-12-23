@@ -359,16 +359,19 @@ class ScreenRecordingService: NSObject, ObservableObject {
         assetWriter = nil
         videoInput = nil
         audioInput = nil
+        pixelBufferAdaptor = nil
         streamOutput = nil
-        
+
         // Clear configuration state
         configuration.region = nil
         configuration.windowID = nil
-        
+
         // Reset session state
         firstFrameTime = nil
         sessionStarted = false
-        
+        captureRegion = nil
+        gifFrames = []
+
         state = .idle
         recordLogger.info("🔄 Recording service reset to idle")
     }
@@ -549,6 +552,7 @@ class ScreenRecordingService: NSObject, ObservableObject {
         assetWriter = nil
         videoInput = nil
         audioInput = nil
+        pixelBufferAdaptor = nil
         gifFrames = []
 
         state = .idle
@@ -623,7 +627,13 @@ class ScreenRecordingService: NSObject, ObservableObject {
         guard case .recording = state else { return }
 
         let timestamp = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-        
+
+        // Get the pixel buffer from the sample buffer
+        guard let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
+            recordLogger.warning("⚠️ No image buffer in sample buffer")
+            return
+        }
+
         // Start asset writer session with first frame if not already started
         if !sessionStarted, let writer = assetWriter, writer.status == .writing {
             firstFrameTime = timestamp
@@ -634,27 +644,35 @@ class ScreenRecordingService: NSObject, ObservableObject {
 
         if configuration.outputFormat == .gif {
             // Store frame for GIF encoding
-            if let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) {
-                let ciImage = CIImage(cvPixelBuffer: imageBuffer)
-                let context = CIContext()
-                if let cgImage = context.createCGImage(ciImage, from: ciImage.extent) {
-                    let time = CMTimeGetSeconds(timestamp)
+            let ciImage = CIImage(cvPixelBuffer: imageBuffer)
+            let context = CIContext()
+            if let cgImage = context.createCGImage(ciImage, from: ciImage.extent) {
+                let time = CMTimeGetSeconds(timestamp)
 
-                    // Only capture frames at GIF frame rate (10 fps for smaller files)
-                    let gifFrameInterval = 1.0 / 10.0
-                    if time - lastFrameTime >= gifFrameInterval {
-                        gifFrames.append((cgImage, time))
-                        lastFrameTime = time
-                    }
+                // Only capture frames at GIF frame rate (10 fps for smaller files)
+                let gifFrameInterval = 1.0 / 10.0
+                if time - lastFrameTime >= gifFrameInterval {
+                    gifFrames.append((cgImage, time))
+                    lastFrameTime = time
                 }
             }
         } else {
-            // Write to video file
-            if let videoInput = videoInput, videoInput.isReadyForMoreMediaData, sessionStarted {
-                videoInput.append(sampleBuffer)
-                recordLogger.debug("📹 Appended video frame to input")
+            // Write to video file using pixel buffer adaptor
+            guard let adaptor = pixelBufferAdaptor,
+                  let videoInput = videoInput,
+                  videoInput.isReadyForMoreMediaData,
+                  sessionStarted else {
+                recordLogger.warning("⚠️ Cannot append frame. Ready: \(self.videoInput?.isReadyForMoreMediaData ?? false), SessionStarted: \(self.sessionStarted), Adaptor: \(self.pixelBufferAdaptor != nil)")
+                return
+            }
+
+            // Append pixel buffer via adaptor for proper format handling
+            if adaptor.append(imageBuffer, withPresentationTime: timestamp) {
+                recordLogger.debug("📹 Appended video frame via adaptor")
             } else {
-                recordLogger.warning("⚠️ Video input not ready. Ready: \(self.videoInput?.isReadyForMoreMediaData ?? false), SessionStarted: \(self.sessionStarted)")
+                if let writer = assetWriter {
+                    recordLogger.warning("⚠️ Failed to append pixel buffer. Writer status: \(writer.status.rawValue), Error: \(writer.error?.localizedDescription ?? "none")")
+                }
             }
         }
     }
@@ -683,19 +701,33 @@ class ScreenRecordingService: NSObject, ObservableObject {
 
         assetWriter = try AVAssetWriter(url: url, fileType: fileType)
 
-        // Video settings
+        // Video settings - use H.264 with proper settings for ScreenCaptureKit input
         let videoSettings: [String: Any] = [
             AVVideoCodecKey: AVVideoCodecType.h264,
             AVVideoWidthKey: Int(size.width),
             AVVideoHeightKey: Int(size.height),
             AVVideoCompressionPropertiesKey: [
                 AVVideoAverageBitRateKey: configuration.quality.videoBitrate,
-                AVVideoExpectedSourceFrameRateKey: configuration.frameRate
-            ]
+                AVVideoExpectedSourceFrameRateKey: configuration.frameRate,
+                AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
+                AVVideoAllowFrameReorderingKey: false
+            ] as [String: Any]
         ]
 
         videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
         videoInput?.expectsMediaDataInRealTime = true
+
+        // Create pixel buffer adaptor for proper format conversion from ScreenCaptureKit
+        let sourcePixelBufferAttributes: [String: Any] = [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferWidthKey as String: Int(size.width),
+            kCVPixelBufferHeightKey as String: Int(size.height)
+        ]
+
+        pixelBufferAdaptor = AVAssetWriterInputPixelBufferAdaptor(
+            assetWriterInput: videoInput!,
+            sourcePixelBufferAttributes: sourcePixelBufferAttributes
+        )
 
         if assetWriter?.canAdd(videoInput!) == true {
             assetWriter?.add(videoInput!)
@@ -722,17 +754,17 @@ class ScreenRecordingService: NSObject, ObservableObject {
             recordLogger.error("❌ Asset writer is nil!")
             return
         }
-        
+
         let startResult = writer.startWriting()
         if !startResult {
             recordLogger.error("❌ Failed to start writing: \(writer.error?.localizedDescription ?? "Unknown error")")
             return
         }
-        
+
         // Don't start session here - will start with first frame timestamp
         sessionStarted = false
         firstFrameTime = nil
-        recordLogger.info("✅ Asset writer initialized - waiting for first frame")
+        recordLogger.info("✅ Asset writer initialized with pixel buffer adaptor - waiting for first frame")
     }
 
     private func finalizeAssetWriter() async {
@@ -769,6 +801,7 @@ class ScreenRecordingService: NSObject, ObservableObject {
         assetWriter = nil
         videoInput = nil
         audioInput = nil
+        pixelBufferAdaptor = nil
     }
 
     private func encodeGif(to url: URL) async throws {
