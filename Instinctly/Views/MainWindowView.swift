@@ -3,6 +3,41 @@ import ScreenCaptureKit
 import AVFoundation
 import UserNotifications
 
+// MARK: - Notification Helper
+struct NotificationHelper {
+    static func showNotification(title: String, body: String) async {
+        let center = UNUserNotificationCenter.current()
+        
+        // Request permission if needed
+        do {
+            _ = try await center.requestAuthorization(options: [.alert, .sound])
+        } catch {
+            print("❌ Failed to request notification permission: \(error)")
+            return
+        }
+        
+        // Create notification content
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+        
+        // Create request
+        let request = UNNotificationRequest(
+            identifier: UUID().uuidString,
+            content: content,
+            trigger: nil
+        )
+        
+        // Schedule notification
+        do {
+            try await center.add(request)
+        } catch {
+            print("❌ Failed to show notification: \(error)")
+        }
+    }
+}
+
 struct MainWindowView: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.openWindow) private var openWindow
@@ -210,38 +245,6 @@ struct MainWindowView: View {
         libraryService.removeCollection(name)
         if selectedCollection == name {
             selectedCollection = nil
-        }
-    }
-    
-    private func showNotification(title: String, body: String) async {
-        let center = UNUserNotificationCenter.current()
-        
-        // Request permission if needed
-        do {
-            _ = try await center.requestAuthorization(options: [.alert, .sound])
-        } catch {
-            print("❌ Failed to request notification permission: \(error)")
-            return
-        }
-        
-        // Create notification content
-        let content = UNMutableNotificationContent()
-        content.title = title
-        content.body = body
-        content.sound = .default
-        
-        // Create request
-        let request = UNNotificationRequest(
-            identifier: UUID().uuidString,
-            content: content,
-            trigger: nil
-        )
-        
-        // Schedule notification
-        do {
-            try await center.add(request)
-        } catch {
-            print("❌ Failed to show notification: \(error)")
         }
     }
     
@@ -576,7 +579,7 @@ struct SidebarRecordButton: View {
             
             // Show notification that it was saved
             Task {
-                await showNotification(title: "Recording Saved", body: "'\(name)' was saved to your library")
+                await NotificationHelper.showNotification(title: "Recording Saved", body: "'\(name)' was saved to your library")
             }
             
             // Open the file in default app (QuickTime for videos, Preview for GIFs)
@@ -1047,7 +1050,7 @@ struct RecentFileCard: View {
             
             // Show notification
             Task {
-                await showNotification(title: "Saved to Library", body: "'\(name)' was added to your library")
+                await NotificationHelper.showNotification(title: "Saved to Library", body: "'\(name)' was added to your library")
             }
             
             print("✅ Saved to library: \(name)")
