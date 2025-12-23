@@ -139,11 +139,10 @@ class ShareService: ObservableObject {
 
         // Create CloudKit record
         let recordID = CKRecord.ID(recordName: shareId)
-        let record = CKRecord(recordType: "SharedMedia", recordID: recordID)
+        let record = CKRecord(recordType: "SharedImage", recordID: recordID)
         record["title"] = title
         record["createdAt"] = Date()
-        record["mediaType"] = "image"
-        record["mediaAsset"] = CKAsset(fileURL: tempURL)
+        record["imageAsset"] = CKAsset(fileURL: tempURL)
 
         // Store annotations as JSON
         if !annotations.isEmpty {
@@ -215,41 +214,17 @@ class ShareService: ObservableObject {
             mediaType = "file"
         }
         
-        // Verify file exists and get size
-        guard FileManager.default.fileExists(atPath: fileURL.path) else {
-            shareLogger.error("❌ File does not exist: \(fileURL.path)")
-            throw ShareError.imageNotFound
-        }
-        
-        do {
-            let attributes = try FileManager.default.attributesOfItem(atPath: fileURL.path)
-            let fileSize = attributes[.size] as? Int64 ?? 0
-            shareLogger.info("📄 File size: \(fileSize) bytes")
-            
-            if fileSize == 0 {
-                shareLogger.error("❌ File is empty: \(fileURL.path)")
-                throw ShareError.imageNotFound
-            }
-        } catch {
-            shareLogger.error("❌ Cannot read file attributes: \(error)")
-            throw ShareError.imageNotFound
-        }
-        
         // Create a unique share ID
         let shareId = UUID().uuidString
         
         // Create CloudKit record
         let recordID = CKRecord.ID(recordName: shareId)
-        let record = CKRecord(recordType: "SharedMedia", recordID: recordID)
+        let record = CKRecord(recordType: "SharedImage", recordID: recordID)
         record["title"] = title ?? fileURL.lastPathComponent
         record["createdAt"] = Date()
-        record["mediaType"] = mediaType
+        record["mediaType"] = mediaType  // Add type info but keep imageAsset field name for compatibility
         record["fileName"] = fileURL.lastPathComponent
-        
-        // Create CKAsset with explicit validation
-        let asset = CKAsset(fileURL: fileURL)
-        shareLogger.info("📎 Created CKAsset for file: \(fileURL.lastPathComponent)")
-        record["mediaAsset"] = asset
+        record["imageAsset"] = CKAsset(fileURL: fileURL)  // Keep original field name for web viewer compatibility
         
         // Upload to public database
         do {
@@ -285,7 +260,7 @@ class ShareService: ObservableObject {
         do {
             let record = try await publicDatabase.record(for: recordID)
 
-            guard let asset = record["mediaAsset"] as? CKAsset,
+            guard let asset = record["imageAsset"] as? CKAsset,
                   let fileURL = asset.fileURL,
                   let image = NSImage(contentsOf: fileURL) else {
                 throw ShareError.imageNotFound
@@ -314,7 +289,7 @@ class ShareService: ObservableObject {
         do {
             let record = try await publicDatabase.record(for: recordID)
             
-            guard let asset = record["mediaAsset"] as? CKAsset,
+            guard let asset = record["imageAsset"] as? CKAsset,
                   let fileURL = asset.fileURL,
                   let mediaType = record["mediaType"] as? String,
                   let fileName = record["fileName"] as? String else {
