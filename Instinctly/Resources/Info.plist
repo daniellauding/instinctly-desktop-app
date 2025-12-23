@@ -29,6 +29,10 @@
     <!-- Privacy Descriptions -->
     <key>NSScreenCaptureUsageDescription</key>
     <string>Instinctly needs screen capture permission to take screenshots and capture regions of your screen.</string>
+    <key>NSCameraUsageDescription</key>
+    <string>Instinctly needs camera access to enable webcam recording overlays and picture-in-picture functionality.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Instinctly needs microphone access to record audio along with screen recordings.</string>
 
     <!-- App Category -->
     <key>LSApplicationCategoryType</key>

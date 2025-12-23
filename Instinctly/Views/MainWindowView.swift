@@ -104,6 +104,11 @@ struct MainWindowView: View {
                         Label("Recent Files", systemImage: "clock")
                     }
                 }
+                Section("Shared") {
+                    NavigationLink(value: "Shared") {
+                        Label("Shared Links", systemImage: "link.circle")
+                    }
+                }
 
                 Section("Library") {
                     NavigationLink(value: "All") {
@@ -185,6 +190,8 @@ struct MainWindowView: View {
                 // Show library items for selected collection or recent files
                 if collection == "Recent" {
                     RecentFilesGridView(appState: appState)
+                } else if collection == "Shared" {
+                    SharedLinksGridView(appState: appState)
                 } else {
                     LibraryGridView(collection: collection, libraryService: libraryService, appState: appState)
                 }
@@ -836,6 +843,259 @@ struct RecentFilesGridView: View {
         }
         
         print("✅ Loaded \(recentFiles.count) recent files total")
+    }
+}
+
+// MARK: - Shared Links Grid View
+struct SharedLinksGridView: View {
+    @ObservedObject var appState: AppState
+    
+    @State private var sharedItems: [(recordID: String, title: String, fileName: String, mediaType: String, createdAt: Date)] = []
+    @State private var isLoading = false
+    @State private var searchText = ""
+    
+    private let columns = [GridItem(.adaptive(minimum: 200, maximum: 250), spacing: 16)]
+    
+    private var filteredItems: [(recordID: String, title: String, fileName: String, mediaType: String, createdAt: Date)] {
+        if searchText.isEmpty {
+            return sharedItems
+        }
+        return sharedItems.filter { $0.fileName.localizedCaseInsensitiveContains(searchText) }
+    }
+    
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header
+            HStack {
+                Text("Shared Links")
+                    .font(.title2)
+                    .fontWeight(.semibold)
+                
+                Spacer()
+                
+                if isLoading {
+                    ProgressView()
+                        .scaleEffect(0.8)
+                }
+                
+                Button(action: loadSharedItems) {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .help("Refresh")
+            }
+            .padding(16)
+            
+            // Search
+            HStack {
+                TextField("Search shared files...", text: $searchText)
+                    .textFieldStyle(.roundedBorder)
+            }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 16)
+            
+            // Content
+            if filteredItems.isEmpty {
+                VStack(spacing: 16) {
+                    Spacer()
+                    Image(systemName: "link.circle")
+                        .font(.system(size: 64))
+                        .foregroundColor(.secondary.opacity(0.5))
+                    Text(isLoading ? "Loading..." : "No Shared Links")
+                        .font(.title2)
+                        .foregroundColor(.secondary)
+                    Text("Files you share to iCloud URLs will appear here")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                    if !isLoading {
+                        Button("Load Shared Files") {
+                            loadSharedItems()
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                // Grid of shared items
+                ScrollView {
+                    LazyVGrid(columns: columns, spacing: 16) {
+                        ForEach(filteredItems, id: \.recordID) { item in
+                            SharedLinkCard(item: item, onDelete: { deleteItem(item.recordID) })
+                        }
+                    }
+                    .padding(16)
+                }
+            }
+        }
+        .onAppear {
+            if sharedItems.isEmpty {
+                loadSharedItems()
+            }
+        }
+        .refreshable {
+            loadSharedItems()
+        }
+    }
+    
+    private func loadSharedItems() {
+        isLoading = true
+        Task {
+            do {
+                let items = try await ShareService.shared.fetchAllSharedMedia()
+                await MainActor.run {
+                    sharedItems = items
+                    isLoading = false
+                }
+            } catch {
+                await MainActor.run {
+                    print("❌ Failed to load shared items: \(error)")
+                    isLoading = false
+                }
+            }
+        }
+    }
+    
+    private func deleteItem(_ recordID: String) {
+        Task {
+            do {
+                try await ShareService.shared.deleteSharedMedia(recordID: recordID)
+                await MainActor.run {
+                    sharedItems.removeAll { $0.recordID == recordID }
+                    print("✅ Deleted shared item: \(recordID)")
+                }
+            } catch {
+                await MainActor.run {
+                    print("❌ Failed to delete shared item: \(error)")
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Shared Link Card
+struct SharedLinkCard: View {
+    let item: (recordID: String, title: String, fileName: String, mediaType: String, createdAt: Date)
+    let onDelete: () -> Void
+    
+    @State private var isHovered = false
+    
+    private var shareURL: String {
+        "https://daniellauding.github.io/instinctly-share?id=\(item.recordID)"
+    }
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            // Media type icon and controls
+            ZStack(alignment: .topTrailing) {
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(.ultraThinMaterial)
+                    .frame(height: 120)
+                    .overlay {
+                        VStack(spacing: 8) {
+                            Image(systemName: mediaTypeIcon)
+                                .font(.system(size: 32))
+                                .foregroundColor(.secondary)
+                            Text(item.mediaType.capitalized)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                
+                // Controls (show on hover)
+                if isHovered {
+                    HStack(spacing: 8) {
+                        Button(action: copyLink) {
+                            Image(systemName: "doc.on.clipboard")
+                                .foregroundColor(.white)
+                                .padding(6)
+                                .background(.ultraThinMaterial)
+                                .clipShape(Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .help("Copy Link")
+                        
+                        Button(action: openLink) {
+                            Image(systemName: "arrow.up.right.square")
+                                .foregroundColor(.white)
+                                .padding(6)
+                                .background(.ultraThinMaterial)
+                                .clipShape(Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .help("Open in Browser")
+                        
+                        Button(action: onDelete) {
+                            Image(systemName: "trash")
+                                .foregroundColor(.red)
+                                .padding(6)
+                                .background(.ultraThinMaterial)
+                                .clipShape(Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .help("Delete from iCloud")
+                    }
+                    .padding(8)
+                }
+            }
+            
+            // File info
+            VStack(alignment: .leading, spacing: 4) {
+                Text(item.fileName)
+                    .font(.subheadline)
+                    .fontWeight(.medium)
+                    .lineLimit(1)
+                
+                Text(formatDate(item.createdAt))
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                
+                Text(shareURL)
+                    .font(.caption)
+                    .foregroundColor(.blue)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+        }
+        .padding(8)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(isHovered ? Color.primary.opacity(0.05) : Color.clear)
+        )
+        .onHover { isHovered = $0 }
+        .contextMenu {
+            Button("Copy Link") { copyLink() }
+            Button("Open in Browser") { openLink() }
+            Divider()
+            Button("Delete", role: .destructive) { onDelete() }
+        }
+    }
+    
+    private var mediaTypeIcon: String {
+        switch item.mediaType {
+        case "gif": return "photo.stack"
+        case "video": return "video.fill"
+        case "audio": return "waveform"
+        default: return "photo"
+        }
+    }
+    
+    private func copyLink() {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(shareURL, forType: .string)
+        print("📋 Copied link: \(shareURL)")
+    }
+    
+    private func openLink() {
+        if let url = URL(string: shareURL) {
+            NSWorkspace.shared.open(url)
+        }
+    }
+    
+    private func formatDate(_ date: Date) -> String {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.dateTimeStyle = .named
+        return formatter.localizedString(for: date, relativeTo: Date())
     }
 }
 

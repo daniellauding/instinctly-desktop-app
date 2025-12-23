@@ -166,6 +166,8 @@ class ScreenRecordingService: NSObject, ObservableObject {
     private var pausedDuration: TimeInterval = 0
     private var lastPauseTime: Date?
     private var timer: Timer?
+    private var firstFrameTime: CMTime?
+    private var sessionStarted = false
 
     private var gifFrames: [(CGImage, TimeInterval)] = []
     private var lastFrameTime: TimeInterval = 0
@@ -358,6 +360,15 @@ class ScreenRecordingService: NSObject, ObservableObject {
         videoInput = nil
         audioInput = nil
         streamOutput = nil
+        
+        // Clear configuration state
+        configuration.region = nil
+        configuration.windowID = nil
+        
+        // Reset session state
+        firstFrameTime = nil
+        sessionStarted = false
+        
         state = .idle
         recordLogger.info("🔄 Recording service reset to idle")
     }
@@ -613,9 +624,12 @@ class ScreenRecordingService: NSObject, ObservableObject {
 
         let timestamp = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         
-        // Log first frame
-        if assetWriter?.status == .writing && videoInput?.isReadyForMoreMediaData == true && CMTimeGetSeconds(timestamp) < 0.1 {
-            recordLogger.info("📹 Processing first video frame at \(CMTimeGetSeconds(timestamp))s")
+        // Start asset writer session with first frame if not already started
+        if !sessionStarted, let writer = assetWriter, writer.status == .writing {
+            firstFrameTime = timestamp
+            writer.startSession(atSourceTime: timestamp)
+            sessionStarted = true
+            recordLogger.info("📹 Started asset writer session with first frame at \(CMTimeGetSeconds(timestamp))s")
         }
 
         if configuration.outputFormat == .gif {
@@ -636,11 +650,11 @@ class ScreenRecordingService: NSObject, ObservableObject {
             }
         } else {
             // Write to video file
-            if let videoInput = videoInput, videoInput.isReadyForMoreMediaData {
+            if let videoInput = videoInput, videoInput.isReadyForMoreMediaData, sessionStarted {
                 videoInput.append(sampleBuffer)
                 recordLogger.debug("📹 Appended video frame to input")
             } else {
-                recordLogger.warning("⚠️ Video input not ready or nil. Ready: \(self.videoInput?.isReadyForMoreMediaData ?? false)")
+                recordLogger.warning("⚠️ Video input not ready. Ready: \(self.videoInput?.isReadyForMoreMediaData ?? false), SessionStarted: \(self.sessionStarted)")
             }
         }
     }
@@ -648,7 +662,8 @@ class ScreenRecordingService: NSObject, ObservableObject {
     func processAudioFrame(_ sampleBuffer: CMSampleBuffer) {
         guard case .recording = state,
               configuration.captureAudio,
-              configuration.outputFormat.supportsAudio else { return }
+              configuration.outputFormat.supportsAudio,
+              sessionStarted else { return }
 
         if let audioInput = audioInput, audioInput.isReadyForMoreMediaData {
             audioInput.append(sampleBuffer)
@@ -714,8 +729,10 @@ class ScreenRecordingService: NSObject, ObservableObject {
             return
         }
         
-        writer.startSession(atSourceTime: .zero)
-        recordLogger.info("✅ Asset writer started successfully")
+        // Don't start session here - will start with first frame timestamp
+        sessionStarted = false
+        firstFrameTime = nil
+        recordLogger.info("✅ Asset writer initialized - waiting for first frame")
     }
 
     private func finalizeAssetWriter() async {

@@ -304,6 +304,74 @@ class ShareService: ObservableObject {
         }
     }
 
+    /// Fetch all shared media from CloudKit for management
+    func fetchAllSharedMedia() async throws -> [(recordID: String, title: String, fileName: String, mediaType: String, createdAt: Date)] {
+        shareLogger.info("📥 Fetching all shared media from CloudKit...")
+        
+        guard isCloudKitAvailable else {
+            shareLogger.error("❌ CloudKit not available")
+            throw ShareError.notAuthenticated
+        }
+        
+        // Use a simple predicate that doesn't reference record fields that aren't queryable
+        let predicate = NSPredicate(value: true)
+        let query = CKQuery(recordType: "SharedImage", predicate: predicate)
+        
+        // Only sort by indexed fields - createdAt should be queryable by default
+        query.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+        
+        do {
+            let result = try await publicDatabase.records(matching: query)
+            var sharedMedia: [(recordID: String, title: String, fileName: String, mediaType: String, createdAt: Date)] = []
+            
+            for (recordID, recordResult) in result.matchResults {
+                switch recordResult {
+                case .success(let record):
+                    let title = record["title"] as? String ?? "Untitled"
+                    let fileName = record["fileName"] as? String ?? title
+                    let mediaType = record["mediaType"] as? String ?? "image"
+                    let createdAt = record.creationDate ?? Date()
+                    
+                    sharedMedia.append((
+                        recordID: recordID.recordName,
+                        title: title,
+                        fileName: fileName,
+                        mediaType: mediaType,
+                        createdAt: createdAt
+                    ))
+                case .failure(let error):
+                    shareLogger.warning("⚠️ Failed to process record \(recordID): \(error)")
+                }
+            }
+            
+            shareLogger.info("✅ Fetched \(sharedMedia.count) shared media items")
+            return sharedMedia
+        } catch {
+            shareLogger.error("❌ Failed to fetch shared media: \(error)")
+            throw error
+        }
+    }
+    
+    /// Delete shared media from CloudKit
+    func deleteSharedMedia(recordID: String) async throws {
+        shareLogger.info("🗑️ Deleting shared media: \(recordID)")
+        
+        guard isCloudKitAvailable else {
+            shareLogger.error("❌ CloudKit not available")
+            throw ShareError.notAuthenticated
+        }
+        
+        let ckRecordID = CKRecord.ID(recordName: recordID)
+        
+        do {
+            _ = try await publicDatabase.deleteRecord(withID: ckRecordID)
+            shareLogger.info("✅ Successfully deleted shared media: \(recordID)")
+        } catch {
+            shareLogger.error("❌ Failed to delete shared media: \(error)")
+            throw error
+        }
+    }
+
     // MARK: - Copy Link to Clipboard
 
     /// Copy the shareable link to clipboard

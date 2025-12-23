@@ -1,4 +1,5 @@
 import SwiftUI
+import ScreenCaptureKit
 
 struct MenuBarView: View {
     @EnvironmentObject private var appState: AppState
@@ -350,9 +351,11 @@ struct RecordingMenuButton: View {
         // Set mode and start
         recordingService.configuration.captureMode = mode
         
-        // Force GIF format if this is the GIF button
+        // Set output format - GIF only for GIF button, otherwise MP4
         if forceGif {
             recordingService.configuration.outputFormat = .gif
+        } else {
+            recordingService.configuration.outputFormat = .mp4
         }
         
         // Enable webcam if this is the webcam button
@@ -391,12 +394,19 @@ struct RecordingMenuButton: View {
             }
 
         case .window:
-            // Need to select window first - show window picker
+            // For now, auto-select frontmost window (TODO: add window picker UI)
             Task { @MainActor in
                 print("🎬 MenuBar: Starting window recording...")
                 do {
-                    try await recordingService.startRecording()
-                    print("🎬 MenuBar: Recording started!")
+                    // Get available windows and select the frontmost one
+                    let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
+                    if let frontWindow = content.windows.first(where: { $0.title?.isEmpty == false && $0.frame.width > 100 && $0.frame.height > 100 }) {
+                        recordingService.configuration.windowID = frontWindow.windowID
+                        try await recordingService.startRecording()
+                        print("🎬 MenuBar: Recording started for window: \(frontWindow.title ?? "Unknown")")
+                    } else {
+                        print("❌ MenuBar: No suitable window found")
+                    }
                 } catch {
                     print("❌ MenuBar: Failed to start recording: \(error)")
                 }

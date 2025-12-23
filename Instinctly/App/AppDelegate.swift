@@ -21,8 +21,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         screenCaptureService = ScreenCaptureService()
         keyboardShortcutManager = KeyboardShortcutManager()
 
-        // Register global shortcuts
+        // Setup global shortcuts (respects user setting)
         setupGlobalShortcuts()
+        
+        // Listen for shortcuts setting changes
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(globalShortcutsSettingChanged(_:)),
+            name: NSNotification.Name("GlobalShortcutsEnabledChanged"),
+            object: nil
+        )
 
         // Request screen capture permission if needed
         Task {
@@ -44,6 +52,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func setupGlobalShortcuts() {
+        // Check if global shortcuts are enabled (default disabled for safety)
+        let globalShortcutsEnabled = UserDefaults.standard.bool(forKey: "globalShortcutsEnabled")
+        
+        if !globalShortcutsEnabled {
+            appLogger.info("⌨️ Global shortcuts disabled by user setting")
+            keyboardShortcutManager?.unregisterAll()
+            return
+        }
+        
         appLogger.info("⌨️ Setting up global shortcuts...")
 
         // Cmd+Shift+3: Full screen capture
@@ -83,6 +100,46 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         appLogger.info("✅ Global shortcuts registered")
+    }
+    
+    @objc private func globalShortcutsSettingChanged(_ notification: Notification) {
+        appLogger.info("⚙️ Global shortcuts setting changed")
+        setupGlobalShortcuts()
+    }
+    
+    // MARK: - URL Handling
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls {
+            handleURL(url)
+        }
+    }
+    
+    private func handleURL(_ url: URL) {
+        appLogger.info("🔗 Handling URL: \(url.absoluteString)")
+        
+        guard url.scheme == "instinctly" else {
+            appLogger.error("❌ Invalid scheme: \(url.scheme ?? "nil")")
+            return
+        }
+        
+        switch url.host {
+        case "editor":
+            // Open editor with current image
+            appLogger.info("📝 Opening editor via URL")
+            if AppState.shared.currentImage != nil {
+                // Open editor window
+                NSApp.activate(ignoringOtherApps: true)
+                NotificationCenter.default.post(name: .openEditorWindow, object: nil)
+            }
+            
+        case "share":
+            // Handle share URL (e.g., instinctly://share/RECORD_ID)
+            let shareId = url.pathComponents.dropFirst().first ?? ""
+            appLogger.info("🔗 Opening share: \(shareId)")
+            
+        default:
+            appLogger.info("❌ Unknown URL host: \(url.host ?? "nil")")
+        }
     }
 
     // MARK: - Capture Actions

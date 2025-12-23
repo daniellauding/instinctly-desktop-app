@@ -183,19 +183,41 @@ struct CaptureSettingsView: View {
 
 // MARK: - Shortcuts Settings
 struct ShortcutsSettingsView: View {
+    @AppStorage("globalShortcutsEnabled") private var globalShortcutsEnabled = false
+    
     var body: some View {
         Form {
             Section {
-                ShortcutRow(action: "Capture Region", shortcut: "⌘⇧3")
-                ShortcutRow(action: "Capture Window", shortcut: "⌘⇧4")
-                ShortcutRow(action: "Capture Full Screen", shortcut: "⌘⇧5")
-                ShortcutRow(action: "Open from Clipboard", shortcut: "⌘⇧6")
+                Toggle("Enable global keyboard shortcuts", isOn: $globalShortcutsEnabled)
+                    .onChange(of: globalShortcutsEnabled) { _, newValue in
+                        // Notify the global shortcuts manager about the change
+                        NotificationCenter.default.post(
+                            name: NSNotification.Name("GlobalShortcutsEnabledChanged"),
+                            object: nil,
+                            userInfo: ["enabled": newValue]
+                        )
+                    }
             } header: {
-                Text("Capture Shortcuts")
+                Text("Global Shortcuts")
             } footer: {
-                Text("Note: These shortcuts may conflict with system shortcuts. Consider using different modifier keys.")
+                Text("Enable this to use keyboard shortcuts from anywhere in the system. When disabled, shortcuts only work when Instinctly is active.")
                     .font(.caption)
                     .foregroundColor(.secondary)
+            }
+            
+            if globalShortcutsEnabled {
+                Section {
+                    ShortcutRow(action: "Capture Region", shortcut: "⌘⇧3")
+                    ShortcutRow(action: "Capture Window", shortcut: "⌘⇧4")
+                    ShortcutRow(action: "Capture Full Screen", shortcut: "⌘⇧5")
+                    ShortcutRow(action: "Open from Clipboard", shortcut: "⌘⇧6")
+                } header: {
+                    Text("Capture Shortcuts")
+                } footer: {
+                    Text("Note: These shortcuts may conflict with system shortcuts. Consider using different modifier keys.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
             }
 
             Section {
