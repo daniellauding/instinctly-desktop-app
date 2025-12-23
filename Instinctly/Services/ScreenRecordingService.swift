@@ -402,6 +402,21 @@ class ScreenRecordingService: NSObject, ObservableObject {
         captureRegion = nil
 
         state = .idle
+        
+        // Verify the output file has content
+        do {
+            let attributes = try FileManager.default.attributesOfItem(atPath: outputURL.path)
+            let fileSize = attributes[.size] as? Int64 ?? 0
+            recordLogger.info("📄 Final file size: \(fileSize) bytes")
+            
+            if fileSize == 0 {
+                recordLogger.error("❌ Recording file is empty! This indicates recording failed.")
+                throw RecordingError.outputFileEmpty
+            }
+        } catch {
+            recordLogger.error("❌ Cannot verify output file: \(error)")
+        }
+        
         recordLogger.info("✅ Recording ready for preview: \(outputURL.path)")
 
         // Return temp URL - UI will show preview with save option
@@ -922,6 +937,7 @@ enum RecordingError: LocalizedError {
     case videoEncodingFailed
     case audioRecorderFailed
     case alreadyRecording
+    case outputFileEmpty
 
     var errorDescription: String? {
         switch self {
@@ -935,6 +951,7 @@ enum RecordingError: LocalizedError {
         case .videoEncodingFailed: return "Failed to encode video"
         case .audioRecorderFailed: return "Failed to start audio recording"
         case .alreadyRecording: return "Recording is already in progress"
+        case .outputFileEmpty: return "Recording file is empty - recording may have failed"
         }
     }
 }

@@ -785,22 +785,57 @@ struct RecentFilesGridView: View {
     }
     
     private func loadRecentFiles() {
-        let tempDir = FileManager.default.temporaryDirectory
+        // Use app's container temp directory instead of system temp directory
+        let containerURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?.appendingPathComponent("tmp")
         
-        do {
-            let allFiles = try FileManager.default.contentsOfDirectory(at: tempDir, includingPropertiesForKeys: [.contentModificationDateKey])
+        // Try multiple potential temp directories
+        let possibleTempDirs = [
+            containerURL,
+            URL(fileURLWithPath: "/Users/daniellauding/Library/Containers/com.instinctly.app/Data/tmp/"),
+            FileManager.default.temporaryDirectory
+        ].compactMap { $0 }
+        
+        var foundFiles: [URL] = []
+        
+        for tempDir in possibleTempDirs {
+            print("🔍 Checking temp directory: \(tempDir.path)")
             
-            // Filter for media files
-            recentFiles = allFiles.filter { url in
-                let ext = url.pathExtension.lowercased()
-                return ["gif", "mp4", "mov", "webm", "m4a", "png", "jpg", "jpeg"].contains(ext)
-            }.filter { url in
-                url.lastPathComponent.hasPrefix("Instinctly_")
+            guard FileManager.default.fileExists(atPath: tempDir.path) else {
+                print("📁 Directory doesn't exist: \(tempDir.path)")
+                continue
             }
-        } catch {
-            print("❌ Failed to load recent files: \(error)")
-            recentFiles = []
+            
+            do {
+                let allFiles = try FileManager.default.contentsOfDirectory(at: tempDir, includingPropertiesForKeys: [.contentModificationDateKey])
+                
+                // Filter for media files
+                let mediaFiles = allFiles.filter { url in
+                    let ext = url.pathExtension.lowercased()
+                    return ["gif", "mp4", "mov", "webm", "m4a", "png", "jpg", "jpeg"].contains(ext)
+                }.filter { url in
+                    url.lastPathComponent.hasPrefix("Instinctly_")
+                }
+                
+                foundFiles.append(contentsOf: mediaFiles)
+                print("📄 Found \(mediaFiles.count) files in \(tempDir.path)")
+                
+                if !mediaFiles.isEmpty {
+                    break // Found files, stop looking
+                }
+            } catch {
+                print("❌ Failed to read directory \(tempDir.path): \(error)")
+                continue
+            }
         }
+        
+        // Sort by modification date (newest first)
+        recentFiles = foundFiles.sorted { url1, url2 in
+            let date1 = (try? FileManager.default.attributesOfItem(atPath: url1.path))?[.modificationDate] as? Date ?? Date.distantPast
+            let date2 = (try? FileManager.default.attributesOfItem(atPath: url2.path))?[.modificationDate] as? Date ?? Date.distantPast
+            return date1 > date2
+        }
+        
+        print("✅ Loaded \(recentFiles.count) recent files total")
     }
 }
 

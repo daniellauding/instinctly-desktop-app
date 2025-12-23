@@ -215,6 +215,26 @@ class ShareService: ObservableObject {
             mediaType = "file"
         }
         
+        // Verify file exists and get size
+        guard FileManager.default.fileExists(atPath: fileURL.path) else {
+            shareLogger.error("❌ File does not exist: \(fileURL.path)")
+            throw ShareError.imageNotFound
+        }
+        
+        do {
+            let attributes = try FileManager.default.attributesOfItem(atPath: fileURL.path)
+            let fileSize = attributes[.size] as? Int64 ?? 0
+            shareLogger.info("📄 File size: \(fileSize) bytes")
+            
+            if fileSize == 0 {
+                shareLogger.error("❌ File is empty: \(fileURL.path)")
+                throw ShareError.imageNotFound
+            }
+        } catch {
+            shareLogger.error("❌ Cannot read file attributes: \(error)")
+            throw ShareError.imageNotFound
+        }
+        
         // Create a unique share ID
         let shareId = UUID().uuidString
         
@@ -225,7 +245,11 @@ class ShareService: ObservableObject {
         record["createdAt"] = Date()
         record["mediaType"] = mediaType
         record["fileName"] = fileURL.lastPathComponent
-        record["mediaAsset"] = CKAsset(fileURL: fileURL)
+        
+        // Create CKAsset with explicit validation
+        let asset = CKAsset(fileURL: fileURL)
+        shareLogger.info("📎 Created CKAsset for file: \(fileURL.lastPathComponent)")
+        record["mediaAsset"] = asset
         
         // Upload to public database
         do {
