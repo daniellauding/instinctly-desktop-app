@@ -394,21 +394,22 @@ struct RecordingMenuButton: View {
             }
 
         case .window:
-            // For now, auto-select frontmost window (TODO: add window picker UI)
+            // Show window picker to let user select which window to record
             Task { @MainActor in
-                print("🎬 MenuBar: Starting window recording...")
-                do {
-                    // Get available windows and select the frontmost one
-                    let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
-                    if let frontWindow = content.windows.first(where: { $0.title?.isEmpty == false && $0.frame.width > 100 && $0.frame.height > 100 }) {
-                        recordingService.configuration.windowID = frontWindow.windowID
+                print("🎬 MenuBar: Starting window selection...")
+                let selector = RecordingWindowSelector()
+                if let result = await selector.selectWindow() {
+                    print("🎬 MenuBar: Window selected: \(result.title)")
+                    recordingService.configuration.windowID = result.windowID
+                    do {
                         try await recordingService.startRecording()
-                        print("🎬 MenuBar: Recording started for window: \(frontWindow.title ?? "Unknown")")
-                    } else {
-                        print("❌ MenuBar: No suitable window found")
+                        print("🎬 MenuBar: Recording started for window: \(result.title)")
+                    } catch {
+                        print("❌ MenuBar: Failed to start recording: \(error)")
                     }
-                } catch {
-                    print("❌ MenuBar: Failed to start recording: \(error)")
+                } else {
+                    print("⚠️ MenuBar: Window selection cancelled")
+                    recordingService.resetToIdle()
                 }
             }
 

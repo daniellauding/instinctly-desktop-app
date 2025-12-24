@@ -193,7 +193,14 @@ class ScreenRecordingService: NSObject, ObservableObject {
 
     /// Start recording with current configuration
     func startRecording() async throws {
-        guard state == .idle else {
+        // Allow starting from idle or error states (auto-reset from error)
+        switch state {
+        case .idle:
+            break // OK to start
+        case .error:
+            recordLogger.info("🔄 Auto-resetting from error state to start new recording")
+            resetToIdle()
+        default:
             recordLogger.warning("⚠️ Cannot start: already recording. Current state: \(String(describing: self.state))")
             throw RecordingError.alreadyRecording
         }

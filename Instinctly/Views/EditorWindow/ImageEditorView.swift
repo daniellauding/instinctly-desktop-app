@@ -66,12 +66,25 @@ struct ImageEditorView: View {
 
     private func setupKeyboardShortcuts() {
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            // Tool shortcuts
-            for tool in AnnotationTool.allCases {
-                if let shortcut = tool.shortcut,
-                   event.charactersIgnoringModifiers == String(shortcut.character) {
-                    appState.selectedTool = tool
-                    return nil
+            // Skip shortcuts if a text field is being edited
+            if let firstResponder = NSApp.keyWindow?.firstResponder {
+                // Check if text input is active (NSTextField, NSTextView, NSSecureTextField, etc.)
+                if firstResponder is NSTextView ||
+                   firstResponder.isKind(of: NSClassFromString("NSTextInputContext")!) == true ||
+                   String(describing: type(of: firstResponder)).contains("TextField") {
+                    return event // Let the text field handle the event
+                }
+            }
+
+            // Tool shortcuts (only single character without modifiers)
+            if event.modifierFlags.intersection(.deviceIndependentFlagsMask).isEmpty ||
+               event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .capsLock {
+                for tool in AnnotationTool.allCases {
+                    if let shortcut = tool.shortcut,
+                       event.charactersIgnoringModifiers == String(shortcut.character) {
+                        appState.selectedTool = tool
+                        return nil
+                    }
                 }
             }
 

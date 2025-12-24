@@ -50,6 +50,17 @@ struct MainWindowView: View {
     @State private var newProjectName = ""
     @State private var selectedCollection: String? = nil
 
+    // Project editing
+    @State private var showEditProjectSheet = false
+    @State private var editingProject: String?
+    @State private var editProjectName = ""
+    @State private var editProjectDescription = ""
+    @State private var editProjectIsPublic = false
+    @State private var editProjectPassword = ""
+    @State private var isSavingProject = false
+    @State private var showDeleteProjectConfirm = false
+    @State private var projectToDelete: String?
+
     // Custom collections (excluding built-in ones)
     private var customProjects: [String] {
         libraryService.collections.filter { !["Screenshots", "Recordings", "Favorites"].contains($0) }
@@ -136,8 +147,27 @@ struct MainWindowView: View {
                                 Label(project, systemImage: "folder")
                             }
                             .contextMenu {
+                                Button {
+                                    editingProject = project
+                                    editProjectName = project
+                                    showEditProjectSheet = true
+                                } label: {
+                                    Label("Edit Project...", systemImage: "pencil")
+                                }
+
+                                Button {
+                                    editingProject = project
+                                    editProjectName = project
+                                    showEditProjectSheet = true
+                                } label: {
+                                    Label("Share Project...", systemImage: "square.and.arrow.up")
+                                }
+
+                                Divider()
+
                                 Button(role: .destructive) {
-                                    deleteProject(project)
+                                    projectToDelete = project
+                                    showDeleteProjectConfirm = true
                                 } label: {
                                     Label("Delete", systemImage: "trash")
                                 }
@@ -229,24 +259,70 @@ struct MainWindowView: View {
         .sheet(isPresented: $showNewProjectSheet) {
             MainWindowNewProjectSheet(
                 projectName: $newProjectName,
-                onCreate: createNewProject,
+                onCreate: { description, isPublic, password in
+                    createNewProject(description: description, isPublic: isPublic, password: password)
+                },
                 onCancel: {
                     newProjectName = ""
                     showNewProjectSheet = false
                 }
             )
         }
+        .sheet(isPresented: $showEditProjectSheet) {
+            EditProjectSheet(
+                projectName: $editProjectName,
+                projectDescription: $editProjectDescription,
+                isPublic: $editProjectIsPublic,
+                password: $editProjectPassword,
+                isSaving: $isSavingProject,
+                onSave: saveProjectEdits,
+                onCancel: {
+                    showEditProjectSheet = false
+                    resetEditProjectState()
+                }
+            )
+        }
+        .alert("Delete Project?", isPresented: $showDeleteProjectConfirm) {
+            Button("Cancel", role: .cancel) {
+                projectToDelete = nil
+            }
+            Button("Delete", role: .destructive) {
+                if let project = projectToDelete {
+                    deleteProject(project)
+                }
+                projectToDelete = nil
+            }
+        } message: {
+            Text("This will delete the project '\(projectToDelete ?? "")' and remove items from this collection. This action cannot be undone.")
+        }
     }
 
     // MARK: - Project Management
 
-    private func createNewProject() {
+    private func createNewProject(description: String?, isPublic: Bool, password: String?) {
         let name = newProjectName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { return }
         libraryService.addCollection(name)
         newProjectName = ""
         showNewProjectSheet = false
         selectedCollection = name
+
+        // Save collection to CloudKit if public
+        if isPublic {
+            Task {
+                do {
+                    try await ShareService.shared.saveCollection(
+                        name: name,
+                        description: description,
+                        isPublic: isPublic,
+                        password: password
+                    )
+                    print("✅ Collection saved to CloudKit: \(name)")
+                } catch {
+                    print("❌ Failed to save collection to CloudKit: \(error)")
+                }
+            }
+        }
     }
 
     private func deleteProject(_ name: String) {
@@ -255,7 +331,49 @@ struct MainWindowView: View {
             selectedCollection = nil
         }
     }
-    
+
+    private func saveProjectEdits() {
+        guard let originalName = editingProject else { return }
+        isSavingProject = true
+
+        Task {
+            do {
+                // Rename locally if name changed
+                if editProjectName != originalName {
+                    libraryService.renameCollection(originalName, to: editProjectName)
+                    if selectedCollection == originalName {
+                        selectedCollection = editProjectName
+                    }
+                }
+
+                // Save to CloudKit
+                try await ShareService.shared.saveCollection(
+                    name: editProjectName,
+                    description: editProjectDescription.isEmpty ? nil : editProjectDescription,
+                    isPublic: editProjectIsPublic,
+                    password: editProjectPassword.isEmpty ? nil : editProjectPassword
+                )
+
+                await MainActor.run {
+                    isSavingProject = false
+                    showEditProjectSheet = false
+                    resetEditProjectState()
+                }
+            } catch {
+                await MainActor.run {
+                    isSavingProject = false
+                }
+            }
+        }
+    }
+
+    private func resetEditProjectState() {
+        editingProject = nil
+        editProjectName = ""
+        editProjectDescription = ""
+        editProjectIsPublic = false
+        editProjectPassword = ""
+    }
 
     // MARK: - Actions
 
@@ -605,23 +723,60 @@ struct SidebarRecordButton: View {
 // MARK: - Main Window New Project Sheet
 struct MainWindowNewProjectSheet: View {
     @Binding var projectName: String
-    let onCreate: () -> Void
+    let onCreate: (String?, Bool, String?) -> Void  // (description, isPublic, password)
     let onCancel: () -> Void
     @FocusState private var isNameFocused: Bool
 
+    @State private var projectDescription = ""
+    @State private var isPublic = false
+    @State private var usePassword = false
+    @State private var password = ""
+    @State private var isSaving = false
+    @AppStorage("defaultSharePublic") private var defaultSharePublic = false
+
     var body: some View {
-        VStack(spacing: 20) {
-            Text("New Project")
+        VStack(spacing: 16) {
+            Text("New Collection")
                 .font(.headline)
 
-            TextField("Project Name", text: $projectName)
-                .textFieldStyle(.roundedBorder)
-                .focused($isNameFocused)
-                .onSubmit {
-                    if !projectName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        onCreate()
-                    }
+            VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Name")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    TextField("Collection name", text: $projectName)
+                        .textFieldStyle(.roundedBorder)
+                        .focused($isNameFocused)
                 }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Description (optional)")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    TextField("What's this collection for?", text: $projectDescription)
+                        .textFieldStyle(.roundedBorder)
+                }
+
+                Divider()
+
+                Toggle("Make public (shareable link)", isOn: $isPublic)
+
+                if isPublic {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Toggle("Password protect", isOn: $usePassword)
+
+                        if usePassword {
+                            SecureField("Enter password", text: $password)
+                                .textFieldStyle(.roundedBorder)
+                        }
+                    }
+                    .padding(.leading, 20)
+
+                    Text("Public collections can be shared via link")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
 
             HStack(spacing: 12) {
                 Button("Cancel") {
@@ -629,18 +784,114 @@ struct MainWindowNewProjectSheet: View {
                 }
                 .keyboardShortcut(.cancelAction)
 
-                Button("Create") {
-                    onCreate()
+                Button(action: {
+                    onCreate(
+                        projectDescription.isEmpty ? nil : projectDescription,
+                        isPublic,
+                        usePassword && !password.isEmpty ? password : nil
+                    )
+                }) {
+                    if isSaving {
+                        ProgressView()
+                            .scaleEffect(0.8)
+                    } else {
+                        Text("Create")
+                    }
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(projectName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(projectName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSaving)
             }
         }
         .padding(24)
-        .frame(width: 300)
+        .frame(width: 360)
         .onAppear {
             isNameFocused = true
+            isPublic = defaultSharePublic
         }
+    }
+}
+
+// MARK: - Edit Project Sheet
+struct EditProjectSheet: View {
+    @Binding var projectName: String
+    @Binding var projectDescription: String
+    @Binding var isPublic: Bool
+    @Binding var password: String
+    @Binding var isSaving: Bool
+    let onSave: () -> Void
+    let onCancel: () -> Void
+
+    @AppStorage("shareUsername") private var shareUsername = ""
+    @State private var usePassword = false
+    @State private var removePassword = false
+
+    var body: some View {
+        VStack(spacing: 16) {
+            HStack {
+                Text("Edit Collection")
+                    .font(.headline)
+                Spacer()
+                Button("Cancel") { onCancel() }
+                    .keyboardShortcut(.cancelAction)
+            }
+
+            VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Name")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    TextField("Collection name", text: $projectName)
+                        .textFieldStyle(.roundedBorder)
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Description")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    TextField("What's this collection for?", text: $projectDescription)
+                        .textFieldStyle(.roundedBorder)
+                }
+
+                Divider()
+
+                Toggle("Make public (shareable link)", isOn: $isPublic)
+
+                if isPublic {
+                    if !shareUsername.isEmpty {
+                        Text("Share URL: ?user=\(shareUsername)&collection=\(projectName.replacingOccurrences(of: " ", with: "_").lowercased())")
+                            .font(.caption)
+                            .foregroundColor(.blue)
+                    }
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Toggle("Password protect", isOn: $usePassword)
+
+                        if usePassword {
+                            SecureField("Enter password", text: $password)
+                                .textFieldStyle(.roundedBorder)
+                        }
+                    }
+                    .padding(.leading, 20)
+                }
+            }
+
+            HStack {
+                Spacer()
+                Button(action: onSave) {
+                    if isSaving {
+                        ProgressView()
+                            .scaleEffect(0.8)
+                    } else {
+                        Text("Save Changes")
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(projectName.isEmpty || isSaving)
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(24)
+        .frame(width: 400)
     }
 }
 
@@ -719,12 +970,19 @@ struct LibraryGridView: View {
 // MARK: - Recent Files Grid View
 struct RecentFilesGridView: View {
     @ObservedObject var appState: AppState
-    
+
     @State private var recentFiles: [URL] = []
     @State private var searchText = ""
-    
+    @State private var viewMode: ViewMode = .grid
+    @State private var selectedFiles: Set<URL> = []
+    @State private var isSelectionMode = false
+
+    enum ViewMode {
+        case grid, list
+    }
+
     private let columns = [GridItem(.adaptive(minimum: 150, maximum: 200), spacing: 16)]
-    
+
     private var filteredFiles: [URL] {
         var files = recentFiles
         if !searchText.isEmpty {
@@ -732,30 +990,83 @@ struct RecentFilesGridView: View {
         }
         return files.sorted { $0.lastPathComponent > $1.lastPathComponent }
     }
-    
+
     var body: some View {
         VStack(spacing: 0) {
-            // Search bar
-            HStack {
-                Image(systemName: "magnifyingglass")
-                    .foregroundColor(.secondary)
-                TextField("Search recent files...", text: $searchText)
-                    .textFieldStyle(.plain)
-                if !searchText.isEmpty {
-                    Button(action: { searchText = "" }) {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundColor(.secondary)
+            // Toolbar with search and view mode
+            HStack(spacing: 12) {
+                // Search bar
+                HStack {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundColor(.secondary)
+                    TextField("Search recent files...", text: $searchText)
+                        .textFieldStyle(.plain)
+                    if !searchText.isEmpty {
+                        Button(action: { searchText = "" }) {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundColor(.secondary)
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
                 }
+                .padding(8)
+                .background(Color.primary.opacity(0.05))
+                .cornerRadius(8)
+                .frame(maxWidth: 300)
+
+                Spacer()
+
+                // Selection mode toggle
+                if !filteredFiles.isEmpty {
+                    Button {
+                        isSelectionMode.toggle()
+                        if !isSelectionMode {
+                            selectedFiles.removeAll()
+                        }
+                    } label: {
+                        Label(isSelectionMode ? "Done" : "Select", systemImage: isSelectionMode ? "checkmark.circle.fill" : "checkmark.circle")
+                    }
+                    .buttonStyle(.bordered)
+                }
+
+                // View mode toggle
+                Picker("View", selection: $viewMode) {
+                    Image(systemName: "square.grid.2x2").tag(ViewMode.grid)
+                    Image(systemName: "list.bullet").tag(ViewMode.list)
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 80)
             }
-            .padding(8)
-            .background(Color.primary.opacity(0.05))
-            .cornerRadius(8)
-            .padding()
-            
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+
+            // Bulk actions bar (when in selection mode with items selected)
+            if isSelectionMode && !selectedFiles.isEmpty {
+                HStack(spacing: 16) {
+                    Text("\(selectedFiles.count) selected")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+
+                    Spacer()
+
+                    Button(action: deleteSelectedFiles) {
+                        Label("Delete", systemImage: "trash")
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(.red)
+
+                    Button(action: { selectedFiles.removeAll() }) {
+                        Label("Deselect All", systemImage: "xmark")
+                    }
+                    .buttonStyle(.bordered)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                .background(Color.accentColor.opacity(0.1))
+            }
+
             Divider()
-            
+
             if filteredFiles.isEmpty {
                 // Empty state
                 VStack(spacing: 16) {
@@ -772,16 +1083,34 @@ struct RecentFilesGridView: View {
                     Spacer()
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
+            } else if viewMode == .grid {
                 // Grid of files
                 ScrollView {
                     LazyVGrid(columns: columns, spacing: 16) {
                         ForEach(filteredFiles, id: \.self) { fileURL in
-                            RecentFileCard(fileURL: fileURL, appState: appState)
+                            RecentFileCard(
+                                fileURL: fileURL,
+                                appState: appState,
+                                isSelectionMode: isSelectionMode,
+                                isSelected: selectedFiles.contains(fileURL),
+                                onToggleSelection: { toggleSelection(fileURL) }
+                            )
                         }
                     }
                     .padding(16)
                 }
+            } else {
+                // List view
+                List(filteredFiles, id: \.self, selection: isSelectionMode ? $selectedFiles : nil) { fileURL in
+                    RecentFileListRow(
+                        fileURL: fileURL,
+                        appState: appState,
+                        isSelectionMode: isSelectionMode,
+                        isSelected: selectedFiles.contains(fileURL),
+                        onToggleSelection: { toggleSelection(fileURL) }
+                    )
+                }
+                .listStyle(.plain)
             }
         }
         .onAppear {
@@ -790,6 +1119,22 @@ struct RecentFilesGridView: View {
         .refreshable {
             loadRecentFiles()
         }
+    }
+
+    private func toggleSelection(_ url: URL) {
+        if selectedFiles.contains(url) {
+            selectedFiles.remove(url)
+        } else {
+            selectedFiles.insert(url)
+        }
+    }
+
+    private func deleteSelectedFiles() {
+        for url in selectedFiles {
+            try? FileManager.default.removeItem(at: url)
+        }
+        selectedFiles.removeAll()
+        loadRecentFiles()
     }
     
     private func loadRecentFiles() {
@@ -1310,6 +1655,249 @@ struct UploadShareSheet: View {
     }
 }
 
+// MARK: - Recent File Share Sheet
+struct RecentFileShareSheet: View {
+    let fileURL: URL
+    @Binding var usePassword: Bool
+    @Binding var password: String
+    @Binding var sharedURL: URL?
+    @Binding var showLinkCopied: Bool
+    @Binding var isPresented: Bool
+    @ObservedObject var shareService: ShareService
+
+    @State private var isUploading = false
+    @State private var errorMessage: String?
+    @State private var shareTitle: String = ""
+    @State private var shareDescription: String = ""
+    @State private var isPublic: Bool = false
+    @AppStorage("defaultSharePublic") private var defaultSharePublic = false
+
+    var body: some View {
+        VStack(spacing: 16) {
+            // Header
+            HStack {
+                Text(sharedURL != nil ? "Link Ready!" : "Share File")
+                    .font(.headline)
+                Spacer()
+                Button("Close") {
+                    isPresented = false
+                }
+                .keyboardShortcut(.cancelAction)
+            }
+
+            if let shareURL = sharedURL {
+                // Success state - show link
+                VStack(spacing: 16) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 48))
+                        .foregroundColor(.green)
+
+                    Text("Link copied to clipboard!")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+
+                    // Show URL
+                    HStack {
+                        Text(shareURL.absoluteString)
+                            .font(.caption)
+                            .foregroundColor(.blue)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+
+                        Button(action: {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(shareURL.absoluteString, forType: .string)
+                        }) {
+                            Image(systemName: "doc.on.doc")
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(12)
+                    .background(Color.gray.opacity(0.1))
+                    .cornerRadius(8)
+
+                    HStack(spacing: 12) {
+                        if usePassword {
+                            HStack(spacing: 4) {
+                                Image(systemName: "lock.fill")
+                                    .foregroundColor(.orange)
+                                Text("Protected")
+                                    .font(.caption)
+                            }
+                        }
+                        if isPublic {
+                            HStack(spacing: 4) {
+                                Image(systemName: "globe")
+                                    .foregroundColor(.blue)
+                                Text("Public")
+                                    .font(.caption)
+                            }
+                        } else {
+                            HStack(spacing: 4) {
+                                Image(systemName: "lock.shield")
+                                    .foregroundColor(.gray)
+                                Text("Private")
+                                    .font(.caption)
+                            }
+                        }
+                    }
+                    .foregroundColor(.secondary)
+                }
+            } else {
+                // Upload state
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 12) {
+                        // File info
+                        HStack(spacing: 12) {
+                            Image(systemName: iconForFile(fileURL))
+                                .font(.system(size: 24))
+                                .foregroundColor(.blue)
+
+                            VStack(alignment: .leading) {
+                                Text(fileURL.lastPathComponent)
+                                    .font(.subheadline)
+                                    .lineLimit(1)
+                                Text(fileType(for: fileURL))
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                        .padding(12)
+                        .background(Color.gray.opacity(0.1))
+                        .cornerRadius(8)
+
+                        // Title field
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Title (optional)")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            TextField("Enter a title", text: $shareTitle)
+                                .textFieldStyle(.roundedBorder)
+                        }
+
+                        // Description field
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Description (optional)")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            TextField("Add a description", text: $shareDescription)
+                                .textFieldStyle(.roundedBorder)
+                        }
+
+                        Divider()
+
+                        // Visibility toggle
+                        Toggle("Make public (visible on profile)", isOn: $isPublic)
+
+                        // Password toggle
+                        VStack(alignment: .leading, spacing: 8) {
+                            Toggle("Password protect", isOn: $usePassword)
+
+                            if usePassword {
+                                SecureField("Enter password", text: $password)
+                                    .textFieldStyle(.roundedBorder)
+
+                                Text("Recipients will need this password to view")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+
+                        if let error = errorMessage {
+                            Text(error)
+                                .font(.caption)
+                                .foregroundColor(.red)
+                        }
+                    }
+                }
+
+                // Upload button
+                HStack {
+                    Spacer()
+                    Button(action: uploadAndShare) {
+                        if isUploading {
+                            ProgressView()
+                                .scaleEffect(0.8)
+                                .frame(width: 16, height: 16)
+                            Text("Uploading...")
+                        } else {
+                            Image(systemName: "link.badge.plus")
+                            Text("Create Link")
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(isUploading || (usePassword && password.isEmpty))
+                }
+            }
+        }
+        .padding(24)
+        .frame(width: 400, height: sharedURL != nil ? 300 : 450)
+        .onAppear {
+            isPublic = defaultSharePublic
+        }
+    }
+
+    private func uploadAndShare() {
+        isUploading = true
+        errorMessage = nil
+
+        Task {
+            do {
+                let url = try await shareService.uploadFileAndGetShareableLink(
+                    fileURL: fileURL,
+                    title: shareTitle.isEmpty ? nil : shareTitle,
+                    description: shareDescription.isEmpty ? nil : shareDescription,
+                    password: usePassword ? password : nil,
+                    isPublic: isPublic
+                )
+
+                await MainActor.run {
+                    sharedURL = url
+                    showLinkCopied = true
+
+                    // Copy to clipboard
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(url.absoluteString, forType: .string)
+
+                    print("✅ Link copied to clipboard: \(url.absoluteString)")
+
+                    // Reset copied indicator after a few seconds
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                        showLinkCopied = false
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    errorMessage = error.localizedDescription
+                    isUploading = false
+                }
+            }
+        }
+    }
+
+    private func iconForFile(_ url: URL) -> String {
+        let ext = url.pathExtension.lowercased()
+        switch ext {
+        case "png", "jpg", "jpeg": return "photo"
+        case "gif": return "photo.stack"
+        case "mp4", "mov", "webm": return "video.fill"
+        case "m4a", "wav": return "waveform"
+        default: return "doc"
+        }
+    }
+
+    private func fileType(for url: URL) -> String {
+        let ext = url.pathExtension.lowercased()
+        switch ext {
+        case "png", "jpg", "jpeg": return "Image"
+        case "gif": return "GIF"
+        case "mp4", "mov", "webm": return "Video"
+        case "m4a", "wav": return "Audio"
+        default: return "File"
+        }
+    }
+}
+
 // MARK: - Shared Link List Row (for list view)
 struct SharedLinkListRow: View {
     let item: (recordID: String, title: String, fileName: String, mediaType: String, createdAt: Date, collection: String?, viewCount: Int, hasPassword: Bool)
@@ -1685,17 +2273,199 @@ struct SharedLinkCard: View {
     }
 }
 
+// MARK: - Recent File List Row
+struct RecentFileListRow: View {
+    let fileURL: URL
+    @ObservedObject var appState: AppState
+    var isSelectionMode: Bool = false
+    var isSelected: Bool = false
+    var onToggleSelection: (() -> Void)?
+
+    @State private var thumbnail: NSImage?
+    @State private var fileSize: String = ""
+    @StateObject private var shareService = ShareService.shared
+
+    private var fileType: String {
+        let ext = fileURL.pathExtension.lowercased()
+        switch ext {
+        case "gif": return "GIF"
+        case "mp4", "mov", "webm": return "Video"
+        case "m4a": return "Audio"
+        case "png", "jpg", "jpeg": return "Image"
+        default: return "File"
+        }
+    }
+
+    private var iconName: String {
+        let ext = fileURL.pathExtension.lowercased()
+        switch ext {
+        case "gif": return "photo.stack"
+        case "mp4", "mov", "webm": return "video.fill"
+        case "m4a": return "waveform"
+        case "png", "jpg", "jpeg": return "photo"
+        default: return "doc.fill"
+        }
+    }
+
+    private var iconColor: Color {
+        let ext = fileURL.pathExtension.lowercased()
+        switch ext {
+        case "gif": return .orange
+        case "mp4", "mov", "webm": return .blue
+        case "m4a": return .green
+        case "png", "jpg", "jpeg": return .purple
+        default: return .gray
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            // Selection checkbox
+            if isSelectionMode {
+                Button(action: { onToggleSelection?() }) {
+                    Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                        .foregroundColor(isSelected ? .accentColor : .secondary)
+                        .font(.title3)
+                }
+                .buttonStyle(.plain)
+            }
+
+            // Thumbnail
+            Group {
+                if let thumbnail = thumbnail {
+                    Image(nsImage: thumbnail)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .frame(width: 60, height: 40)
+                        .clipped()
+                        .cornerRadius(4)
+                } else {
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(Color.gray.opacity(0.2))
+                        .frame(width: 60, height: 40)
+                        .overlay {
+                            Image(systemName: iconName)
+                                .foregroundColor(iconColor)
+                        }
+                }
+            }
+
+            // File info
+            VStack(alignment: .leading, spacing: 2) {
+                Text(fileURL.lastPathComponent)
+                    .font(.body)
+                    .lineLimit(1)
+
+                HStack(spacing: 8) {
+                    Text(fileType)
+                        .font(.caption)
+                        .foregroundColor(iconColor)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 1)
+                        .background(iconColor.opacity(0.1))
+                        .cornerRadius(4)
+
+                    Text(fileSize)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+
+                    Text(formatDate())
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            Spacer()
+
+            // Actions
+            if !isSelectionMode {
+                HStack(spacing: 8) {
+                    Button(action: { NSWorkspace.shared.open(fileURL) }) {
+                        Image(systemName: "arrow.up.right.square")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Open")
+
+                    Button(action: { NSWorkspace.shared.selectFile(fileURL.path, inFileViewerRootedAtPath: "") }) {
+                        Image(systemName: "folder")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Show in Finder")
+
+                    Button(action: deleteFile) {
+                        Image(systemName: "trash")
+                            .foregroundColor(.red)
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Delete")
+                }
+            }
+        }
+        .padding(.vertical, 4)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if isSelectionMode {
+                onToggleSelection?()
+            } else {
+                NSWorkspace.shared.open(fileURL)
+            }
+        }
+        .onAppear {
+            loadThumbnail()
+            loadFileSize()
+        }
+    }
+
+    private func formatDate() -> String {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: fileURL.path),
+              let date = attrs[.modificationDate] as? Date else { return "" }
+        let formatter = DateFormatter()
+        formatter.dateStyle = .short
+        formatter.timeStyle = .short
+        return formatter.string(from: date)
+    }
+
+    private func loadThumbnail() {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let nsImage = NSImage(contentsOf: fileURL)
+            DispatchQueue.main.async {
+                thumbnail = nsImage
+            }
+        }
+    }
+
+    private func loadFileSize() {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: fileURL.path),
+              let size = attrs[.size] as? Int64 else { return }
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        fileSize = formatter.string(fromByteCount: size)
+    }
+
+    private func deleteFile() {
+        try? FileManager.default.removeItem(at: fileURL)
+    }
+}
+
 // MARK: - Recent File Card
 struct RecentFileCard: View {
     let fileURL: URL
     @ObservedObject var appState: AppState
-    
+    var isSelectionMode: Bool = false
+    var isSelected: Bool = false
+    var onToggleSelection: (() -> Void)?
+
     @State private var isHovered = false
     @State private var fileSize: String = ""
     @State private var thumbnail: NSImage?
     @State private var showPreview = false
+    @State private var showShareSheet = false
+    @State private var sharePassword = ""
+    @State private var usePassword = false
+    @State private var sharedURL: URL?
+    @State private var showLinkCopied = false
     @StateObject private var shareService = ShareService.shared
-    
+
     private var fileType: String {
         let ext = fileURL.pathExtension.lowercased()
         switch ext {
@@ -1736,7 +2506,7 @@ struct RecentFileCard: View {
                 RoundedRectangle(cornerRadius: 8)
                     .fill(Color.gray.opacity(0.1))
                     .aspectRatio(16/10, contentMode: .fit)
-                
+
                 if let thumbnail = thumbnail {
                     Image(nsImage: thumbnail)
                         .resizable()
@@ -1766,15 +2536,36 @@ struct RecentFileCard: View {
                         Image(systemName: iconName)
                             .font(.system(size: 32))
                             .foregroundColor(iconColor)
-                        
+
                         Text(fileType)
                             .font(.caption)
                             .fontWeight(.medium)
                             .foregroundColor(.secondary)
                     }
                 }
-                
-                if isHovered {
+
+                // Selection overlay
+                if isSelectionMode {
+                    Color.black.opacity(isSelected ? 0.3 : 0.1)
+                        .cornerRadius(8)
+
+                    VStack {
+                        HStack {
+                            Button(action: { onToggleSelection?() }) {
+                                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                                    .font(.title2)
+                                    .foregroundColor(isSelected ? .accentColor : .white)
+                                    .padding(8)
+                                    .background(.ultraThinMaterial)
+                                    .clipShape(Circle())
+                            }
+                            .buttonStyle(.plain)
+                            Spacer()
+                        }
+                        Spacer()
+                    }
+                    .padding(8)
+                } else if isHovered {
                     Color.black.opacity(0.4)
                         .cornerRadius(8)
                     
@@ -1787,14 +2578,20 @@ struct RecentFileCard: View {
                                 .cornerRadius(6)
                         }
                         .buttonStyle(.plain)
-                        
+
                         HStack(spacing: 8) {
                             // Share to iCloud
-                            Button(action: shareToCloud) {
+                            Button(action: { showShareSheet = true }) {
                                 if shareService.isSharing {
                                     ProgressView()
                                         .scaleEffect(0.5)
                                         .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                                        .padding(6)
+                                        .background(.ultraThinMaterial)
+                                        .clipShape(Circle())
+                                } else if showLinkCopied {
+                                    Image(systemName: "checkmark")
+                                        .foregroundColor(.green)
                                         .padding(6)
                                         .background(.ultraThinMaterial)
                                         .clipShape(Circle())
@@ -1808,7 +2605,7 @@ struct RecentFileCard: View {
                             }
                             .buttonStyle(.plain)
                             .disabled(shareService.isSharing)
-                            
+
                             // Copy to clipboard
                             Button(action: copyPath) {
                                 Image(systemName: "doc.on.clipboard")
@@ -1880,25 +2677,21 @@ struct RecentFileCard: View {
         .sheet(isPresented: $showPreview) {
             FilePreviewPanel(fileURL: fileURL, isPresented: $showPreview)
         }
+        .sheet(isPresented: $showShareSheet) {
+            RecentFileShareSheet(
+                fileURL: fileURL,
+                usePassword: $usePassword,
+                password: $sharePassword,
+                sharedURL: $sharedURL,
+                showLinkCopied: $showLinkCopied,
+                isPresented: $showShareSheet,
+                shareService: shareService
+            )
+        }
     }
-    
+
     private func openFile() {
         NSWorkspace.shared.open(fileURL)
-    }
-    
-    private func shareToCloud() {
-        Task {
-            do {
-                let shareURL = try await shareService.uploadFileAndGetShareableLink(fileURL: fileURL)
-                await MainActor.run {
-                    print("✅ Recent file shared to iCloud: \(shareURL.absoluteString)")
-                }
-            } catch {
-                await MainActor.run {
-                    print("❌ Failed to share recent file: \(error.localizedDescription)")
-                }
-            }
-        }
     }
     
     private func copyPath() {

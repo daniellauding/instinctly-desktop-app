@@ -270,6 +270,16 @@ struct CloudSettingsView: View {
     @AppStorage("iCloudSync") private var iCloudSync = true
     @AppStorage("syncCollections") private var syncCollections = true
     @AppStorage("syncSettings") private var syncSettings = false
+    @AppStorage("shareUsername") private var shareUsername = ""
+    @AppStorage("defaultSharePublic") private var defaultSharePublic = false
+    @AppStorage("profileBio") private var profileBio = ""
+    @AppStorage("profileWebsite") private var profileWebsite = ""
+    @AppStorage("profilePassword") private var profilePassword = ""
+    @AppStorage("profileLogoURL") private var profileLogoURL = ""
+
+    @State private var isSavingProfile = false
+    @State private var profileSaveStatus: String?
+    @StateObject private var shareService = ShareService.shared
 
     var body: some View {
         Form {
@@ -282,6 +292,89 @@ struct CloudSettingsView: View {
                 }
             } header: {
                 Text("iCloud")
+            }
+
+            Section {
+                HStack {
+                    Text("Username")
+                    Spacer()
+                    TextField("Enter username", text: $shareUsername)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 200)
+                }
+
+                Toggle("Make uploads public by default", isOn: $defaultSharePublic)
+
+                if !shareUsername.isEmpty {
+                    HStack {
+                        Text("Your profile")
+                        Spacer()
+                        Button(action: openProfileInBrowser) {
+                            HStack(spacing: 4) {
+                                Text("Open in Browser")
+                                Image(systemName: "arrow.up.right.square")
+                            }
+                        }
+                        .buttonStyle(.link)
+                    }
+                }
+            } header: {
+                Text("Sharing Profile")
+            } footer: {
+                if shareUsername.isEmpty {
+                    Text("Set a username to enable your public profile page")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            Section {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Bio")
+                    TextField("Short description about you", text: $profileBio)
+                        .textFieldStyle(.roundedBorder)
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Website")
+                    TextField("https://yourwebsite.com", text: $profileWebsite)
+                        .textFieldStyle(.roundedBorder)
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Logo URL (optional)")
+                    TextField("https://example.com/logo.png", text: $profileLogoURL)
+                        .textFieldStyle(.roundedBorder)
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Profile Password (optional)")
+                    SecureField("Leave empty for public access", text: $profilePassword)
+                        .textFieldStyle(.roundedBorder)
+                    Text("Visitors will need this password to view your profile")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+
+                HStack {
+                    Button(action: saveProfile) {
+                        if isSavingProfile {
+                            ProgressView()
+                                .scaleEffect(0.8)
+                        } else {
+                            Text("Save Profile")
+                        }
+                    }
+                    .disabled(shareUsername.isEmpty || isSavingProfile)
+
+                    if let status = profileSaveStatus {
+                        Text(status)
+                            .font(.caption)
+                            .foregroundColor(status.contains("✓") ? .green : .red)
+                    }
+                }
+            } header: {
+                Text("Profile Customization")
             }
 
             if iCloudSync {
@@ -312,6 +405,44 @@ struct CloudSettingsView: View {
         }
         .formStyle(.grouped)
         .padding()
+    }
+
+    private func saveProfile() {
+        guard !shareUsername.isEmpty else { return }
+        isSavingProfile = true
+        profileSaveStatus = nil
+
+        Task {
+            do {
+                try await shareService.saveUserProfile(
+                    username: shareUsername,
+                    bio: profileBio.isEmpty ? nil : profileBio,
+                    website: profileWebsite.isEmpty ? nil : profileWebsite,
+                    logoURL: profileLogoURL.isEmpty ? nil : profileLogoURL,
+                    password: profilePassword.isEmpty ? nil : profilePassword
+                )
+                await MainActor.run {
+                    isSavingProfile = false
+                    profileSaveStatus = "✓ Saved"
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                        profileSaveStatus = nil
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    isSavingProfile = false
+                    profileSaveStatus = "Error: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    private func openProfileInBrowser() {
+        guard !shareUsername.isEmpty else { return }
+        let urlString = "https://daniellauding.github.io/instinctly-share?user=\(shareUsername)"
+        if let url = URL(string: urlString) {
+            NSWorkspace.shared.open(url)
+        }
     }
 }
 

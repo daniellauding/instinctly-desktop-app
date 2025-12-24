@@ -969,6 +969,248 @@ struct WindowRowView: View {
     }
 }
 
+// MARK: - Recording Window Selector
+private let recordingWindowLogger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "Instinctly", category: "RecordingWindowSelection")
+
+@MainActor
+class RecordingWindowSelector {
+    private var activeController: RecordingWindowSelectionController?
+
+    func selectWindow() async -> (windowID: CGWindowID, title: String)? {
+        recordingWindowLogger.info("🎬 Starting recording window selection")
+
+        return await withCheckedContinuation { continuation in
+            var hasResumed = false
+
+            let controller = RecordingWindowSelectionController { [weak self] result in
+                guard !hasResumed else {
+                    recordingWindowLogger.warning("⚠️ Continuation already resumed, ignoring")
+                    return
+                }
+                hasResumed = true
+                recordingWindowLogger.info("✅ Window selection complete: \(result?.title ?? "cancelled")")
+                self?.activeController = nil
+                continuation.resume(returning: result)
+            }
+
+            self.activeController = controller
+            controller.show()
+        }
+    }
+}
+
+// MARK: - Recording Window Selection Controller
+@MainActor
+class RecordingWindowSelectionController: NSWindowController {
+    private var onComplete: (((windowID: CGWindowID, title: String)?) -> Void)?
+    private var hasClosed = false
+
+    convenience init(onComplete: @escaping ((windowID: CGWindowID, title: String)?) -> Void) {
+        recordingWindowLogger.info("🎯 Initializing RecordingWindowSelectionController")
+
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 500),
+            styleMask: [.titled, .closable, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+
+        panel.title = "Select Window to Record"
+        panel.level = .floating
+        panel.isFloatingPanel = true
+        panel.hidesOnDeactivate = false
+        panel.becomesKeyOnlyIfNeeded = true
+
+        self.init(window: panel)
+        self.onComplete = onComplete
+
+        let hostingView = NSHostingView(rootView: RecordingWindowSelectionView(
+            onSelect: { [weak self] windowID, title in
+                self?.handleComplete((windowID, title))
+            },
+            onCancel: { [weak self] in
+                self?.handleComplete(nil)
+            }
+        ))
+        panel.contentView = hostingView
+
+        // Center on screen
+        if let screen = NSScreen.main {
+            let x = screen.visibleFrame.midX - 210
+            let y = screen.visibleFrame.midY - 250
+            panel.setFrameOrigin(NSPoint(x: x, y: y))
+        }
+
+        recordingWindowLogger.info("✅ RecordingWindowSelectionController initialized")
+    }
+
+    func show() {
+        recordingWindowLogger.info("📺 Showing recording window selection")
+        showWindow(nil)
+        window?.orderFrontRegardless()
+        window?.makeKey()
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func handleComplete(_ result: (windowID: CGWindowID, title: String)?) {
+        guard !hasClosed else { return }
+        hasClosed = true
+
+        recordingWindowLogger.info("🎬 Closing window picker")
+        window?.orderOut(nil)
+        close()
+
+        let completion = onComplete
+        onComplete = nil
+
+        DispatchQueue.main.async {
+            completion?(result)
+        }
+    }
+}
+
+// MARK: - Recording Window Selection View
+struct RecordingWindowSelectionView: View {
+    let onSelect: (CGWindowID, String) -> Void
+    let onCancel: () -> Void
+
+    @State private var windows: [(id: CGWindowID, title: String, appName: String, icon: NSImage?)] = []
+    @State private var isLoading = true
+
+    var body: some View {
+        VStack(spacing: 16) {
+            // Header
+            HStack {
+                Image(systemName: "macwindow")
+                    .foregroundColor(.red)
+                Text("Select Window to Record")
+                    .font(.headline)
+                Spacer()
+                Button("Cancel") { onCancel() }
+                    .keyboardShortcut(.escape, modifiers: [])
+            }
+
+            Divider()
+
+            if isLoading {
+                VStack {
+                    ProgressView()
+                    Text("Loading windows...")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if windows.isEmpty {
+                VStack(spacing: 8) {
+                    Image(systemName: "macwindow")
+                        .font(.largeTitle)
+                        .foregroundColor(.secondary)
+                    Text("No windows available")
+                        .foregroundColor(.secondary)
+                    Text("Open an application window and try again")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 8) {
+                        ForEach(windows, id: \.id) { window in
+                            WindowSelectionRow(
+                                title: window.title,
+                                appName: window.appName,
+                                icon: window.icon
+                            ) {
+                                onSelect(window.id, "\(window.appName): \(window.title)")
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 4)
+                }
+            }
+        }
+        .padding(20)
+        .frame(width: 400, height: 450)
+        .onAppear {
+            loadWindows()
+        }
+    }
+
+    private func loadWindows() {
+        Task {
+            do {
+                let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
+                let windowList = content.windows.compactMap { window -> (id: CGWindowID, title: String, appName: String, icon: NSImage?)? in
+                    guard let title = window.title, !title.isEmpty,
+                          window.frame.width > 50, window.frame.height > 50,
+                          let app = window.owningApplication,
+                          app.bundleIdentifier != Bundle.main.bundleIdentifier else {
+                        return nil
+                    }
+                    let appName = app.applicationName
+                    let icon = NSRunningApplication(processIdentifier: app.processID)?.icon
+                    return (window.windowID, title, appName, icon)
+                }
+
+                await MainActor.run {
+                    windows = windowList
+                    isLoading = false
+                }
+            } catch {
+                await MainActor.run {
+                    isLoading = false
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Window Selection Row
+struct WindowSelectionRow: View {
+    let title: String
+    let appName: String
+    let icon: NSImage?
+    let onSelect: () -> Void
+
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: onSelect) {
+            HStack(spacing: 12) {
+                if let icon = icon {
+                    Image(nsImage: icon)
+                        .resizable()
+                        .frame(width: 36, height: 36)
+                } else {
+                    Image(systemName: "macwindow")
+                        .font(.title2)
+                        .frame(width: 36, height: 36)
+                }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.system(size: 13))
+                        .lineLimit(1)
+                    Text(appName)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+
+                Spacer()
+
+                Image(systemName: "record.circle")
+                    .foregroundColor(.red)
+                    .opacity(isHovered ? 1 : 0.5)
+            }
+            .padding(10)
+            .background(isHovered ? Color.red.opacity(0.1) : Color.secondary.opacity(0.05))
+            .cornerRadius(8)
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+    }
+}
+
 // MARK: - Recording Region Selector
 private let recordingRegionLogger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "Instinctly", category: "RecordingRegionSelection")
 

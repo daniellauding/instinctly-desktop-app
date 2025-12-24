@@ -106,7 +106,10 @@ class ShareService: ObservableObject {
     func uploadAndGetShareableLink(
         image: NSImage,
         title: String = "Shared Screenshot",
-        annotations: [Annotation] = []
+        description: String? = nil,
+        annotations: [Annotation] = [],
+        isPublic: Bool? = nil,
+        password: String? = nil
     ) async throws -> URL {
         shareLogger.info("☁️ Uploading image to CloudKit for sharing...")
 
@@ -121,8 +124,17 @@ class ShareService: ObservableObject {
 
         defer { isSharing = false }
 
+        // Render annotations onto image if any exist
+        let imageToUpload: NSImage
+        if !annotations.isEmpty {
+            shareLogger.info("🎨 Rendering \(annotations.count) annotations onto image...")
+            imageToUpload = ImageProcessingService.renderAnnotations(on: image, annotations: annotations)
+        } else {
+            imageToUpload = image
+        }
+
         // Convert image to data
-        guard let tiffData = image.tiffRepresentation,
+        guard let tiffData = imageToUpload.tiffRepresentation,
               let bitmap = NSBitmapImageRep(data: tiffData),
               let imageData = bitmap.representation(using: .png, properties: [.compressionFactor: 0.8]) else {
             throw ShareError.imageConversionFailed
@@ -138,12 +150,37 @@ class ShareService: ObservableObject {
             .appendingPathComponent("share_\(shareId).png")
         try imageData.write(to: tempURL)
 
+        // Get user settings
+        let username = UserDefaults.standard.string(forKey: "shareUsername") ?? ""
+        let defaultPublic = UserDefaults.standard.bool(forKey: "defaultSharePublic")
+
         // Create CloudKit record
         let recordID = CKRecord.ID(recordName: shareId)
         let record = CKRecord(recordType: "SharedImage", recordID: recordID)
         record["title"] = title
         record["createdAt"] = Date()
         record["imageAsset"] = CKAsset(fileURL: tempURL)
+        record["mediaType"] = "image"
+        record["fileName"] = "\(title).png"
+
+        // Add description if provided
+        if let description = description, !description.isEmpty {
+            record["description"] = description
+        }
+
+        // Add username if set
+        if !username.isEmpty {
+            record["username"] = username
+        }
+
+        // Add visibility
+        let visibility = isPublic ?? defaultPublic
+        record["isPublic"] = visibility ? 1 : 0
+
+        // Add password protection if set
+        if let password = password, !password.isEmpty {
+            record["passwordHash"] = hashPassword(password)
+        }
 
         // Store annotations as JSON
         if !annotations.isEmpty {
@@ -185,8 +222,10 @@ class ShareService: ObservableObject {
     func uploadFileAndGetShareableLink(
         fileURL: URL,
         title: String? = nil,
+        description: String? = nil,
         collection: String? = nil,
-        password: String? = nil
+        password: String? = nil,
+        isPublic: Bool? = nil
     ) async throws -> URL {
         shareLogger.info("☁️ Uploading file to CloudKit for sharing: \(fileURL.lastPathComponent)")
 
@@ -200,6 +239,10 @@ class ShareService: ObservableObject {
         shareError = nil
 
         defer { isSharing = false }
+
+        // Get user settings
+        let username = UserDefaults.standard.string(forKey: "shareUsername") ?? ""
+        let defaultPublic = UserDefaults.standard.bool(forKey: "defaultSharePublic")
 
         // Determine media type from file extension
         let ext = fileURL.pathExtension.lowercased()
@@ -232,6 +275,20 @@ class ShareService: ObservableObject {
         record["mediaType"] = mediaType
         record["fileName"] = fileURL.lastPathComponent
         record["imageAsset"] = CKAsset(fileURL: fileURL)
+
+        // Add description if provided
+        if let description = description, !description.isEmpty {
+            record["description"] = description
+        }
+
+        // Add username if set
+        if !username.isEmpty {
+            record["username"] = username
+        }
+
+        // Add visibility (use provided value or default from settings)
+        let visibility = isPublic ?? defaultPublic
+        record["isPublic"] = visibility ? 1 : 0
 
         // Add collection if provided
         if let collection = collection {
@@ -282,6 +339,198 @@ class ShareService: ObservableObject {
     /// Verify password against stored hash
     func verifyPassword(_ password: String, hash: String) -> Bool {
         return hashPassword(password) == hash
+    }
+
+    // MARK: - User Profile
+
+    /// Save or update user profile to CloudKit
+    func saveUserProfile(
+        username: String,
+        bio: String? = nil,
+        website: String? = nil,
+        logoURL: String? = nil,
+        password: String? = nil
+    ) async throws {
+        shareLogger.info("👤 Saving user profile for: \(username)")
+
+        guard isCloudKitAvailable else {
+            shareLogger.error("❌ CloudKit not available")
+            throw ShareError.notAuthenticated
+        }
+
+        // Use username as the record ID for easy lookup
+        let recordID = CKRecord.ID(recordName: "profile_\(username)")
+
+        // Try to fetch existing record or create new one
+        var record: CKRecord
+        do {
+            record = try await publicDatabase.record(for: recordID)
+            shareLogger.info("📝 Updating existing profile")
+        } catch {
+            record = CKRecord(recordType: "UserProfile", recordID: recordID)
+            shareLogger.info("🆕 Creating new profile")
+        }
+
+        // Set profile fields
+        record["username"] = username
+        record["bio"] = bio
+        record["website"] = website
+        record["logoURL"] = logoURL
+        record["updatedAt"] = Date()
+
+        // Hash password if provided
+        if let password = password, !password.isEmpty {
+            record["passwordHash"] = hashPassword(password)
+        } else {
+            record["passwordHash"] = nil
+        }
+
+        // Save to CloudKit
+        do {
+            let savedRecord = try await publicDatabase.save(record)
+            shareLogger.info("✅ Profile saved: \(savedRecord.recordID.recordName)")
+        } catch {
+            shareLogger.error("❌ Failed to save profile: \(error.localizedDescription)")
+            throw error
+        }
+    }
+
+    /// Fetch user profile from CloudKit
+    func fetchUserProfile(username: String) async throws -> (bio: String?, website: String?, logoURL: String?, hasPassword: Bool) {
+        shareLogger.info("👤 Fetching profile for: \(username)")
+
+        let recordID = CKRecord.ID(recordName: "profile_\(username)")
+
+        do {
+            let record = try await publicDatabase.record(for: recordID)
+
+            let bio = record["bio"] as? String
+            let website = record["website"] as? String
+            let logoURL = record["logoURL"] as? String
+            let hasPassword = (record["passwordHash"] as? String) != nil
+
+            shareLogger.info("✅ Profile fetched for \(username)")
+            return (bio, website, logoURL, hasPassword)
+        } catch {
+            // Profile doesn't exist yet - that's okay
+            shareLogger.info("ℹ️ No profile found for \(username)")
+            return (nil, nil, nil, false)
+        }
+    }
+
+    // MARK: - Collections
+
+    /// Save or update a collection to CloudKit
+    func saveCollection(
+        name: String,
+        description: String? = nil,
+        isPublic: Bool = false,
+        password: String? = nil
+    ) async throws {
+        let username = UserDefaults.standard.string(forKey: "shareUsername") ?? ""
+        shareLogger.info("📁 Saving collection: \(name) for user: \(username)")
+
+        guard isCloudKitAvailable else {
+            shareLogger.error("❌ CloudKit not available")
+            throw ShareError.notAuthenticated
+        }
+
+        // Create unique record ID using username and collection name
+        let sanitizedName = name.replacingOccurrences(of: " ", with: "_").lowercased()
+        let recordID = CKRecord.ID(recordName: "collection_\(username)_\(sanitizedName)")
+
+        // Try to fetch existing record or create new one
+        var record: CKRecord
+        do {
+            record = try await publicDatabase.record(for: recordID)
+            shareLogger.info("📝 Updating existing collection")
+        } catch {
+            record = CKRecord(recordType: "Collection", recordID: recordID)
+            shareLogger.info("🆕 Creating new collection")
+        }
+
+        // Set collection fields
+        record["name"] = name
+        record["username"] = username
+        record["description"] = description
+        record["isPublic"] = isPublic ? 1 : 0
+        record["updatedAt"] = Date()
+        record["createdAt"] = record["createdAt"] ?? Date()
+
+        // Hash password if provided
+        if let password = password, !password.isEmpty {
+            record["passwordHash"] = hashPassword(password)
+        } else {
+            record["passwordHash"] = nil
+        }
+
+        // Save to CloudKit
+        do {
+            let savedRecord = try await publicDatabase.save(record)
+            shareLogger.info("✅ Collection saved: \(savedRecord.recordID.recordName)")
+        } catch {
+            shareLogger.error("❌ Failed to save collection: \(error.localizedDescription)")
+            throw error
+        }
+    }
+
+    /// Fetch a collection from CloudKit
+    func fetchCollection(username: String, collectionName: String) async throws -> (name: String, description: String?, hasPassword: Bool, isPublic: Bool) {
+        let sanitizedName = collectionName.replacingOccurrences(of: " ", with: "_").lowercased()
+        shareLogger.info("📁 Fetching collection: \(collectionName) for user: \(username)")
+
+        let recordID = CKRecord.ID(recordName: "collection_\(username)_\(sanitizedName)")
+
+        do {
+            let record = try await publicDatabase.record(for: recordID)
+
+            let name = record["name"] as? String ?? collectionName
+            let description = record["description"] as? String
+            let hasPassword = (record["passwordHash"] as? String) != nil
+            let isPublic = (record["isPublic"] as? Int ?? 0) == 1
+
+            shareLogger.info("✅ Collection fetched: \(name)")
+            return (name, description, hasPassword, isPublic)
+        } catch {
+            shareLogger.error("❌ Collection not found: \(collectionName)")
+            throw error
+        }
+    }
+
+    /// Fetch items in a public collection
+    func fetchCollectionItems(username: String, collectionName: String) async throws -> [(recordID: String, title: String, fileName: String, mediaType: String, viewCount: Int, hasPassword: Bool)] {
+        shareLogger.info("📁 Fetching items in collection: \(collectionName)")
+
+        guard isCloudKitAvailable else {
+            throw ShareError.notAuthenticated
+        }
+
+        let query = CKQuery(recordType: "SharedImage", predicate: NSPredicate(format: "username == %@ AND collection == %@", username, collectionName))
+        query.sortDescriptors = [NSSortDescriptor(key: "createdAt", ascending: false)]
+
+        do {
+            let (results, _) = try await publicDatabase.records(matching: query)
+
+            var items: [(recordID: String, title: String, fileName: String, mediaType: String, viewCount: Int, hasPassword: Bool)] = []
+
+            for (recordID, result) in results {
+                if case .success(let record) = result {
+                    let title = record["title"] as? String ?? "Untitled"
+                    let fileName = record["fileName"] as? String ?? ""
+                    let mediaType = record["mediaType"] as? String ?? "image"
+                    let viewCount = record["viewCount"] as? Int ?? 0
+                    let hasPassword = (record["passwordHash"] as? String) != nil
+
+                    items.append((recordID.recordName, title, fileName, mediaType, viewCount, hasPassword))
+                }
+            }
+
+            shareLogger.info("✅ Fetched \(items.count) items in collection")
+            return items
+        } catch {
+            shareLogger.error("❌ Failed to fetch collection items: \(error)")
+            throw error
+        }
     }
 
     // MARK: - Fetch Shared Image
@@ -417,19 +666,66 @@ class ShareService: ObservableObject {
     /// Delete shared media from CloudKit
     func deleteSharedMedia(recordID: String) async throws {
         shareLogger.info("🗑️ Deleting shared media: \(recordID)")
-        
+
         guard isCloudKitAvailable else {
             shareLogger.error("❌ CloudKit not available")
             throw ShareError.notAuthenticated
         }
-        
+
         let ckRecordID = CKRecord.ID(recordName: recordID)
-        
+
         do {
             _ = try await publicDatabase.deleteRecord(withID: ckRecordID)
             shareLogger.info("✅ Successfully deleted shared media: \(recordID)")
         } catch {
             shareLogger.error("❌ Failed to delete shared media: \(error)")
+            throw error
+        }
+    }
+
+    /// Update shared media settings in CloudKit
+    func updateSharedMedia(
+        recordID: String,
+        title: String? = nil,
+        description: String? = nil,
+        isPublic: Bool? = nil,
+        password: String? = nil,
+        removePassword: Bool = false
+    ) async throws {
+        shareLogger.info("📝 Updating shared media: \(recordID)")
+
+        guard isCloudKitAvailable else {
+            shareLogger.error("❌ CloudKit not available")
+            throw ShareError.notAuthenticated
+        }
+
+        let ckRecordID = CKRecord.ID(recordName: recordID)
+
+        // Fetch existing record
+        let record = try await publicDatabase.record(for: ckRecordID)
+
+        // Update fields
+        if let title = title {
+            record["title"] = title
+        }
+        if let description = description {
+            record["description"] = description
+        }
+        if let isPublic = isPublic {
+            record["isPublic"] = isPublic ? 1 : 0
+        }
+        if removePassword {
+            record["passwordHash"] = nil
+        } else if let password = password, !password.isEmpty {
+            record["passwordHash"] = hashPassword(password)
+        }
+
+        // Save updated record
+        do {
+            _ = try await publicDatabase.save(record)
+            shareLogger.info("✅ Successfully updated shared media: \(recordID)")
+        } catch {
+            shareLogger.error("❌ Failed to update shared media: \(error)")
             throw error
         }
     }
@@ -552,12 +848,24 @@ struct ShareSheet: View {
     @StateObject private var shareService = ShareService.shared
 
     @State private var shareURL: URL?
+    @State private var shareId: String?
     @State private var isUploading = false
+    @State private var isUpdating = false
+    @State private var isDeleting = false
+    @State private var isEditing = false
     @State private var showCopiedAlert = false
+    @State private var showDeleteConfirm = false
     @State private var errorMessage: String?
+    @State private var shareTitle = ""
+    @State private var shareDescription = ""
+    @State private var sharePassword = ""
+    @State private var hasExistingPassword = false
+    @State private var removePassword = false
+    @State private var isPublic = false
+    @AppStorage("defaultSharePublic") private var defaultSharePublic = false
 
     var body: some View {
-        VStack(spacing: 20) {
+        VStack(spacing: 16) {
             // Header
             HStack {
                 Text("Share Screenshot")
@@ -623,7 +931,8 @@ struct ShareSheet: View {
                         .cornerRadius(4)
                 }
 
-                if let url = shareURL {
+                if let url = shareURL, !isEditing {
+                    // Share link display
                     HStack {
                         Text(url.absoluteString)
                             .font(.system(.caption, design: .monospaced))
@@ -641,7 +950,138 @@ struct ShareSheet: View {
                     .padding(8)
                     .background(Color.secondary.opacity(0.1))
                     .cornerRadius(6)
+
+                    // Status badges
+                    HStack(spacing: 8) {
+                        if isPublic {
+                            Label("Public", systemImage: "globe")
+                                .font(.caption)
+                                .foregroundColor(.blue)
+                        } else {
+                            Label("Private", systemImage: "lock.shield")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        if hasExistingPassword || !sharePassword.isEmpty {
+                            Label("Protected", systemImage: "lock.fill")
+                                .font(.caption)
+                                .foregroundColor(.orange)
+                        }
+                    }
+
+                    // Action buttons
+                    HStack(spacing: 12) {
+                        Button {
+                            isEditing = true
+                        } label: {
+                            Label("Edit Settings", systemImage: "pencil")
+                        }
+                        .buttonStyle(.bordered)
+
+                        Button(role: .destructive) {
+                            showDeleteConfirm = true
+                        } label: {
+                            if isDeleting {
+                                ProgressView()
+                                    .scaleEffect(0.7)
+                            } else {
+                                Label("Delete Link", systemImage: "trash")
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(isDeleting)
+                    }
+                    .padding(.top, 4)
+
+                } else if isEditing {
+                    // Edit mode - show form to update settings
+                    Text("Edit Share Settings")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+
+                    TextField("Title", text: $shareTitle)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.caption)
+
+                    TextField("Description", text: $shareDescription)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.caption)
+
+                    // Password section
+                    VStack(alignment: .leading, spacing: 4) {
+                        if hasExistingPassword {
+                            HStack {
+                                Toggle("Remove password protection", isOn: $removePassword)
+                                    .font(.caption)
+                            }
+                        }
+                        if !removePassword {
+                            HStack {
+                                SecureField(hasExistingPassword ? "New password (leave empty to keep)" : "Password (optional)", text: $sharePassword)
+                                    .textFieldStyle(.roundedBorder)
+                                    .font(.caption)
+                                if !sharePassword.isEmpty {
+                                    Image(systemName: "lock.fill")
+                                        .foregroundColor(.orange)
+                                        .font(.caption)
+                                }
+                            }
+                        }
+                    }
+
+                    Toggle("Make public (visible on profile)", isOn: $isPublic)
+                        .font(.caption)
+
+                    HStack(spacing: 12) {
+                        Button {
+                            isEditing = false
+                            removePassword = false
+                            sharePassword = ""
+                        } label: {
+                            Text("Cancel")
+                        }
+                        .buttonStyle(.bordered)
+
+                        Button {
+                            updateShare()
+                        } label: {
+                            if isUpdating {
+                                ProgressView()
+                                    .scaleEffect(0.7)
+                            } else {
+                                Text("Save Changes")
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(isUpdating)
+                    }
                 } else {
+                    // Title field
+                    TextField("Title (optional)", text: $shareTitle)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.caption)
+
+                    // Description field
+                    TextField("Description (optional)", text: $shareDescription)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.caption)
+
+                    // Password field
+                    HStack {
+                        SecureField("Password (optional)", text: $sharePassword)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.caption)
+                        if !sharePassword.isEmpty {
+                            Image(systemName: "lock.fill")
+                                .foregroundColor(.orange)
+                                .font(.caption)
+                        }
+                    }
+
+                    // Public toggle
+                    Toggle("Make public (visible on profile)", isOn: $isPublic)
+                        .font(.caption)
+
                     Button {
                         uploadToCloud()
                     } label: {
@@ -673,9 +1113,20 @@ struct ShareSheet: View {
             }
         }
         .padding(20)
-        .frame(width: 400)
+        .frame(width: 420)
         .alert("Copied!", isPresented: $showCopiedAlert) {
             Button("OK", role: .cancel) { }
+        }
+        .alert("Delete Share Link?", isPresented: $showDeleteConfirm) {
+            Button("Cancel", role: .cancel) { }
+            Button("Delete", role: .destructive) {
+                deleteShare()
+            }
+        } message: {
+            Text("This will permanently remove the shareable link. Anyone with the link will no longer be able to access this content.")
+        }
+        .onAppear {
+            isPublic = defaultSharePublic
         }
     }
 
@@ -687,9 +1138,23 @@ struct ShareSheet: View {
             do {
                 let url = try await shareService.uploadAndGetShareableLink(
                     image: image,
-                    annotations: annotations
+                    title: shareTitle.isEmpty ? "Shared Screenshot" : shareTitle,
+                    description: shareDescription.isEmpty ? nil : shareDescription,
+                    annotations: annotations,
+                    isPublic: isPublic,
+                    password: sharePassword.isEmpty ? nil : sharePassword
                 )
                 shareURL = url
+                // Extract share ID from URL
+                if let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+                   let idParam = components.queryItems?.first(where: { $0.name == "id" })?.value {
+                    shareId = idParam
+                }
+                // Track if password was set
+                if !sharePassword.isEmpty {
+                    hasExistingPassword = true
+                }
+                sharePassword = "" // Clear password after upload
             } catch let ckError as CKError {
                 // Handle specific CloudKit errors
                 switch ckError.code {
@@ -706,6 +1171,59 @@ struct ShareSheet: View {
                 errorMessage = error.localizedDescription
             }
             isUploading = false
+        }
+    }
+
+    private func updateShare() {
+        guard let shareId = shareId else { return }
+        isUpdating = true
+        errorMessage = nil
+
+        Task {
+            do {
+                try await shareService.updateSharedMedia(
+                    recordID: shareId,
+                    title: shareTitle.isEmpty ? nil : shareTitle,
+                    description: shareDescription.isEmpty ? nil : shareDescription,
+                    isPublic: isPublic,
+                    password: sharePassword.isEmpty ? nil : sharePassword,
+                    removePassword: removePassword
+                )
+                // Update password state
+                if removePassword {
+                    hasExistingPassword = false
+                } else if !sharePassword.isEmpty {
+                    hasExistingPassword = true
+                }
+                sharePassword = ""
+                removePassword = false
+                isEditing = false
+            } catch {
+                errorMessage = "Failed to update: \(error.localizedDescription)"
+            }
+            isUpdating = false
+        }
+    }
+
+    private func deleteShare() {
+        guard let shareId = shareId else { return }
+        isDeleting = true
+        errorMessage = nil
+
+        Task {
+            do {
+                try await shareService.deleteSharedMedia(recordID: shareId)
+                // Reset state
+                shareURL = nil
+                self.shareId = nil
+                hasExistingPassword = false
+                sharePassword = ""
+                shareTitle = ""
+                shareDescription = ""
+            } catch {
+                errorMessage = "Failed to delete: \(error.localizedDescription)"
+            }
+            isDeleting = false
         }
     }
 }

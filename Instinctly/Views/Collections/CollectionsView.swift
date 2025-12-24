@@ -4,6 +4,7 @@ struct CollectionsView: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.openWindow) private var openWindow
     @StateObject private var libraryService = LibraryService.shared
+    @StateObject private var shareService = ShareService.shared
 
     @State private var selectedCollection: String? = "All"
     @State private var searchText = ""
@@ -11,6 +12,22 @@ struct CollectionsView: View {
     @State private var sortOrder: SortOrder = .dateDescending
     @State private var showNewCollectionSheet = false
     @State private var newCollectionName = ""
+
+    // Collection management
+    @State private var showEditCollectionSheet = false
+    @State private var editingCollection: String?
+    @State private var editCollectionName = ""
+    @State private var editCollectionDescription = ""
+    @State private var editCollectionIsPublic = false
+    @State private var editCollectionPassword = ""
+    @State private var editCollectionRemovePassword = false
+    @State private var isSavingCollection = false
+    @State private var showDeleteConfirmation = false
+    @State private var collectionToDelete: String?
+
+    // Multi-select
+    @State private var isSelectionMode = false
+    @State private var selectedItems: Set<LibraryItem.ID> = []
 
     enum ViewMode {
         case grid, list
@@ -55,8 +72,23 @@ struct CollectionsView: View {
                                 Label(collection, systemImage: "folder")
                             }
                             .contextMenu {
+                                Button {
+                                    editCollection(collection)
+                                } label: {
+                                    Label("Edit Collection...", systemImage: "pencil")
+                                }
+
+                                Button {
+                                    shareCollection(collection)
+                                } label: {
+                                    Label("Share Collection...", systemImage: "square.and.arrow.up")
+                                }
+
+                                Divider()
+
                                 Button(role: .destructive) {
-                                    deleteCollection(collection)
+                                    collectionToDelete = collection
+                                    showDeleteConfirmation = true
                                 } label: {
                                     Label("Delete", systemImage: "trash")
                                 }
@@ -115,6 +147,34 @@ struct CollectionsView: View {
                 }
             )
         }
+        .sheet(isPresented: $showEditCollectionSheet) {
+            EditCollectionSheet(
+                collectionName: $editCollectionName,
+                collectionDescription: $editCollectionDescription,
+                isPublic: $editCollectionIsPublic,
+                password: $editCollectionPassword,
+                removePassword: $editCollectionRemovePassword,
+                isSaving: $isSavingCollection,
+                onSave: saveCollectionEdits,
+                onCancel: {
+                    showEditCollectionSheet = false
+                    resetEditState()
+                }
+            )
+        }
+        .alert("Delete Collection?", isPresented: $showDeleteConfirmation) {
+            Button("Cancel", role: .cancel) {
+                collectionToDelete = nil
+            }
+            Button("Delete", role: .destructive) {
+                if let collection = collectionToDelete {
+                    deleteCollection(collection)
+                }
+                collectionToDelete = nil
+            }
+        } message: {
+            Text("This will delete the collection '\(collectionToDelete ?? "")' and all its items. This action cannot be undone.")
+        }
     }
 
     private var filteredItems: [LibraryItem] {
@@ -166,8 +226,180 @@ struct CollectionsView: View {
         }
     }
 
+    private func editCollection(_ name: String) {
+        editingCollection = name
+        editCollectionName = name
+        editCollectionDescription = "" // TODO: Load from CloudKit if exists
+        editCollectionIsPublic = false // TODO: Load from CloudKit if exists
+        editCollectionPassword = ""
+        editCollectionRemovePassword = false
+        showEditCollectionSheet = true
+    }
+
+    private func shareCollection(_ name: String) {
+        // For now, just open the edit sheet with share options visible
+        editCollection(name)
+    }
+
+    private func saveCollectionEdits() {
+        guard let originalName = editingCollection else { return }
+        isSavingCollection = true
+
+        Task {
+            do {
+                // Rename locally if name changed
+                if editCollectionName != originalName {
+                    libraryService.renameCollection(originalName, to: editCollectionName)
+                    if selectedCollection == originalName {
+                        selectedCollection = editCollectionName
+                    }
+                }
+
+                // Save to CloudKit
+                try await shareService.saveCollection(
+                    name: editCollectionName,
+                    description: editCollectionDescription.isEmpty ? nil : editCollectionDescription,
+                    isPublic: editCollectionIsPublic,
+                    password: editCollectionRemovePassword ? nil : (editCollectionPassword.isEmpty ? nil : editCollectionPassword)
+                )
+
+                await MainActor.run {
+                    isSavingCollection = false
+                    showEditCollectionSheet = false
+                    resetEditState()
+                }
+            } catch {
+                await MainActor.run {
+                    isSavingCollection = false
+                    // Show error
+                }
+            }
+        }
+    }
+
+    private func resetEditState() {
+        editingCollection = nil
+        editCollectionName = ""
+        editCollectionDescription = ""
+        editCollectionIsPublic = false
+        editCollectionPassword = ""
+        editCollectionRemovePassword = false
+    }
+
     private func captureNew() {
         NotificationCenter.default.post(name: .captureRegion, object: nil)
+    }
+}
+
+// MARK: - Edit Collection Sheet
+struct EditCollectionSheet: View {
+    @Binding var collectionName: String
+    @Binding var collectionDescription: String
+    @Binding var isPublic: Bool
+    @Binding var password: String
+    @Binding var removePassword: Bool
+    @Binding var isSaving: Bool
+    let onSave: () -> Void
+    let onCancel: () -> Void
+
+    @AppStorage("shareUsername") private var shareUsername = ""
+    @State private var hasExistingPassword = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header
+            HStack {
+                Text("Edit Collection")
+                    .font(.headline)
+                Spacer()
+                Button("Cancel") { onCancel() }
+                    .keyboardShortcut(.cancelAction)
+            }
+            .padding()
+
+            Divider()
+
+            // Form
+            Form {
+                Section {
+                    TextField("Collection Name", text: $collectionName)
+                        .textFieldStyle(.roundedBorder)
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Description")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        TextEditor(text: $collectionDescription)
+                            .frame(height: 60)
+                            .font(.body)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 4)
+                                    .stroke(Color.secondary.opacity(0.2))
+                            )
+                    }
+                } header: {
+                    Text("Details")
+                }
+
+                Section {
+                    Toggle("Make collection public", isOn: $isPublic)
+
+                    if isPublic && !shareUsername.isEmpty {
+                        HStack {
+                            Text("Share URL")
+                                .foregroundColor(.secondary)
+                            Spacer()
+                            Text("?user=\(shareUsername)&collection=\(collectionName.replacingOccurrences(of: " ", with: "_").lowercased())")
+                                .font(.caption)
+                                .foregroundColor(.blue)
+                        }
+                    }
+
+                    if !shareUsername.isEmpty && isPublic {
+                        VStack(alignment: .leading, spacing: 4) {
+                            if hasExistingPassword {
+                                Toggle("Remove password protection", isOn: $removePassword)
+                            }
+
+                            if !removePassword {
+                                SecureField(hasExistingPassword ? "New password (leave empty to keep)" : "Password (optional)", text: $password)
+                                    .textFieldStyle(.roundedBorder)
+                            }
+                        }
+                    }
+                } header: {
+                    Text("Sharing")
+                } footer: {
+                    if shareUsername.isEmpty {
+                        Text("Set a username in Settings → iCloud to enable sharing")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
+            .formStyle(.grouped)
+            .frame(height: 350)
+
+            Divider()
+
+            // Footer
+            HStack {
+                Spacer()
+                Button(action: onSave) {
+                    if isSaving {
+                        ProgressView()
+                            .scaleEffect(0.8)
+                    } else {
+                        Text("Save Changes")
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(collectionName.isEmpty || isSaving)
+                .keyboardShortcut(.defaultAction)
+            }
+            .padding()
+        }
+        .frame(width: 400)
     }
 }
 

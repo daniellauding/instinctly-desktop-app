@@ -182,6 +182,7 @@ class ImageProcessingService {
     /// Render all annotations onto an image
     static func renderAnnotations(on image: NSImage, annotations: [Annotation]) -> NSImage {
         let size = image.size
+        imageLogger.info("🎨 Rendering \(annotations.count) annotations on image of size \(size.width)x\(size.height)")
 
         let resultImage = NSImage(size: size)
         resultImage.lockFocus()
@@ -189,46 +190,68 @@ class ImageProcessingService {
         // Draw original image
         image.draw(in: NSRect(origin: .zero, size: size))
 
-        // Draw each annotation
+        // Draw each annotation (with coordinate flip for SwiftUI -> NSImage)
         for annotation in annotations {
-            renderAnnotation(annotation, scale: 1.0)
+            imageLogger.debug("🎨 Rendering annotation type: \(annotation.type.rawValue)")
+            renderAnnotation(annotation, imageHeight: size.height)
         }
 
         resultImage.unlockFocus()
+        imageLogger.info("✅ Finished rendering annotations")
         return resultImage
     }
 
-    private static func renderAnnotation(_ annotation: Annotation, scale: CGFloat) {
+    /// Flip Y coordinate from SwiftUI (top-left origin) to NSImage (bottom-left origin)
+    private static func flipY(_ y: CGFloat, imageHeight: CGFloat) -> CGFloat {
+        return imageHeight - y
+    }
+
+    /// Flip a point's Y coordinate
+    private static func flipPoint(_ point: CGPoint, imageHeight: CGFloat) -> CGPoint {
+        return CGPoint(x: point.x, y: imageHeight - point.y)
+    }
+
+    /// Flip a rect's Y coordinate (origin is at bottom-left after flip)
+    private static func flipRect(_ rect: CGRect, imageHeight: CGFloat) -> CGRect {
+        return CGRect(
+            x: rect.origin.x,
+            y: imageHeight - rect.origin.y - rect.height,
+            width: rect.width,
+            height: rect.height
+        )
+    }
+
+    private static func renderAnnotation(_ annotation: Annotation, imageHeight: CGFloat) {
         let context = NSGraphicsContext.current!.cgContext
 
         switch annotation.type {
         case .arrow:
-            renderArrow(annotation, in: context)
+            renderArrow(annotation, in: context, imageHeight: imageHeight)
 
         case .line:
-            renderLine(annotation, in: context)
+            renderLine(annotation, in: context, imageHeight: imageHeight)
 
         case .rectangle:
-            renderRectangle(annotation, in: context)
+            renderRectangle(annotation, in: context, imageHeight: imageHeight)
 
         case .circle:
-            renderCircle(annotation, in: context)
+            renderCircle(annotation, in: context, imageHeight: imageHeight)
 
         case .freehand, .highlighter:
-            renderFreehand(annotation, in: context)
+            renderFreehand(annotation, in: context, imageHeight: imageHeight)
 
         case .text:
-            renderText(annotation)
+            renderText(annotation, imageHeight: imageHeight)
 
         case .blur:
             // Blur would need to be applied to the base image before rendering
             break
 
         case .numberedStep:
-            renderNumberedStep(annotation, in: context)
+            renderNumberedStep(annotation, in: context, imageHeight: imageHeight)
 
         case .callout:
-            renderCallout(annotation)
+            renderCallout(annotation, imageHeight: imageHeight)
 
         case .crop:
             // Crop is handled separately
@@ -236,8 +259,12 @@ class ImageProcessingService {
         }
     }
 
-    private static func renderArrow(_ annotation: Annotation, in context: CGContext) {
+    private static func renderArrow(_ annotation: Annotation, in context: CGContext, imageHeight: CGFloat) {
         guard let start = annotation.startPoint, let end = annotation.endPoint else { return }
+
+        // Flip Y coordinates for NSImage coordinate system
+        let flippedStart = flipPoint(start, imageHeight: imageHeight)
+        let flippedEnd = flipPoint(end, imageHeight: imageHeight)
 
         let nsColor = NSColor(annotation.color)
         context.setStrokeColor(nsColor.cgColor)
@@ -246,58 +273,66 @@ class ImageProcessingService {
         context.setLineJoin(.round)
 
         // Draw line
-        context.move(to: start)
-        context.addLine(to: end)
+        context.move(to: flippedStart)
+        context.addLine(to: flippedEnd)
         context.strokePath()
 
         // Draw arrowhead
-        let angle = atan2(end.y - start.y, end.x - start.x)
-        let arrowLength: CGFloat = 15
+        let angle = atan2(flippedEnd.y - flippedStart.y, flippedEnd.x - flippedStart.x)
+        let arrowLength: CGFloat = 15 + annotation.strokeWidth
         let arrowAngle: CGFloat = .pi / 6
 
-        context.move(to: end)
+        context.move(to: flippedEnd)
         context.addLine(to: CGPoint(
-            x: end.x - arrowLength * cos(angle - arrowAngle),
-            y: end.y - arrowLength * sin(angle - arrowAngle)
+            x: flippedEnd.x - arrowLength * cos(angle - arrowAngle),
+            y: flippedEnd.y - arrowLength * sin(angle - arrowAngle)
         ))
-        context.move(to: end)
+        context.move(to: flippedEnd)
         context.addLine(to: CGPoint(
-            x: end.x - arrowLength * cos(angle + arrowAngle),
-            y: end.y - arrowLength * sin(angle + arrowAngle)
+            x: flippedEnd.x - arrowLength * cos(angle + arrowAngle),
+            y: flippedEnd.y - arrowLength * sin(angle + arrowAngle)
         ))
         context.strokePath()
     }
 
-    private static func renderLine(_ annotation: Annotation, in context: CGContext) {
+    private static func renderLine(_ annotation: Annotation, in context: CGContext, imageHeight: CGFloat) {
         guard let start = annotation.startPoint, let end = annotation.endPoint else { return }
+
+        // Flip Y coordinates
+        let flippedStart = flipPoint(start, imageHeight: imageHeight)
+        let flippedEnd = flipPoint(end, imageHeight: imageHeight)
 
         let nsColor = NSColor(annotation.color)
         context.setStrokeColor(nsColor.cgColor)
         context.setLineWidth(annotation.strokeWidth)
         context.setLineCap(.round)
 
-        context.move(to: start)
-        context.addLine(to: end)
+        context.move(to: flippedStart)
+        context.addLine(to: flippedEnd)
         context.strokePath()
     }
 
-    private static func renderRectangle(_ annotation: Annotation, in context: CGContext) {
+    private static func renderRectangle(_ annotation: Annotation, in context: CGContext, imageHeight: CGFloat) {
         let nsColor = NSColor(annotation.color)
         context.setStrokeColor(nsColor.cgColor)
         context.setLineWidth(annotation.strokeWidth)
 
-        context.stroke(annotation.frame)
+        // Flip Y coordinate for rect
+        let flippedRect = flipRect(annotation.frame, imageHeight: imageHeight)
+        context.stroke(flippedRect)
     }
 
-    private static func renderCircle(_ annotation: Annotation, in context: CGContext) {
+    private static func renderCircle(_ annotation: Annotation, in context: CGContext, imageHeight: CGFloat) {
         let nsColor = NSColor(annotation.color)
         context.setStrokeColor(nsColor.cgColor)
         context.setLineWidth(annotation.strokeWidth)
 
-        context.strokeEllipse(in: annotation.frame)
+        // Flip Y coordinate for rect
+        let flippedRect = flipRect(annotation.frame, imageHeight: imageHeight)
+        context.strokeEllipse(in: flippedRect)
     }
 
-    private static func renderFreehand(_ annotation: Annotation, in context: CGContext) {
+    private static func renderFreehand(_ annotation: Annotation, in context: CGContext, imageHeight: CGFloat) {
         guard annotation.points.count > 1 else { return }
 
         let nsColor = NSColor(annotation.color)
@@ -313,9 +348,12 @@ class ImageProcessingService {
         context.setLineCap(.round)
         context.setLineJoin(.round)
 
-        context.move(to: annotation.points[0])
+        // Flip Y coordinates for all points
+        let flippedFirst = flipPoint(annotation.points[0], imageHeight: imageHeight)
+        context.move(to: flippedFirst)
         for point in annotation.points.dropFirst() {
-            context.addLine(to: point)
+            let flippedPoint = flipPoint(point, imageHeight: imageHeight)
+            context.addLine(to: flippedPoint)
         }
         context.strokePath()
 
@@ -324,7 +362,7 @@ class ImageProcessingService {
         }
     }
 
-    private static func renderText(_ annotation: Annotation) {
+    private static func renderText(_ annotation: Annotation, imageHeight: CGFloat) {
         guard let text = annotation.text else { return }
 
         let font = NSFont.systemFont(ofSize: annotation.fontSize ?? 16)
@@ -334,21 +372,33 @@ class ImageProcessingService {
         ]
 
         let string = NSAttributedString(string: text, attributes: attributes)
-        string.draw(at: annotation.frame.origin)
+        let textSize = string.size()
+
+        // Flip Y coordinate for text position (text draws from bottom-left of baseline)
+        let flippedPoint = CGPoint(
+            x: annotation.frame.origin.x,
+            y: imageHeight - annotation.frame.origin.y - textSize.height
+        )
+        string.draw(at: flippedPoint)
     }
 
-    private static func renderNumberedStep(_ annotation: Annotation, in context: CGContext) {
+    private static func renderNumberedStep(_ annotation: Annotation, in context: CGContext, imageHeight: CGFloat) {
         let nsColor = NSColor(annotation.color)
+
+        // Flip Y coordinate for circle
+        let flippedRect = flipRect(
+            CGRect(
+                x: annotation.frame.origin.x,
+                y: annotation.frame.origin.y,
+                width: 30,
+                height: 30
+            ),
+            imageHeight: imageHeight
+        )
 
         // Draw circle
         context.setFillColor(nsColor.cgColor)
-        let circleRect = CGRect(
-            x: annotation.frame.origin.x,
-            y: annotation.frame.origin.y,
-            width: 30,
-            height: 30
-        )
-        context.fillEllipse(in: circleRect)
+        context.fillEllipse(in: flippedRect)
 
         // Draw number
         let number = "\(annotation.stepNumber ?? 1)"
@@ -361,17 +411,20 @@ class ImageProcessingService {
         let string = NSAttributedString(string: number, attributes: attributes)
         let textSize = string.size()
         let textPoint = CGPoint(
-            x: circleRect.midX - textSize.width / 2,
-            y: circleRect.midY - textSize.height / 2
+            x: flippedRect.midX - textSize.width / 2,
+            y: flippedRect.midY - textSize.height / 2
         )
         string.draw(at: textPoint)
     }
 
-    private static func renderCallout(_ annotation: Annotation) {
+    private static func renderCallout(_ annotation: Annotation, imageHeight: CGFloat) {
         let nsColor = NSColor(annotation.color)
 
+        // Flip Y coordinate for bubble
+        let flippedRect = flipRect(annotation.frame, imageHeight: imageHeight)
+
         // Draw bubble
-        let path = NSBezierPath(roundedRect: annotation.frame, xRadius: 8, yRadius: 8)
+        let path = NSBezierPath(roundedRect: flippedRect, xRadius: 8, yRadius: 8)
         nsColor.withAlphaComponent(0.9).setFill()
         path.fill()
 
@@ -384,7 +437,7 @@ class ImageProcessingService {
             ]
 
             let string = NSAttributedString(string: text, attributes: attributes)
-            let textRect = annotation.frame.insetBy(dx: 8, dy: 8)
+            let textRect = flippedRect.insetBy(dx: 8, dy: 8)
             string.draw(in: textRect)
         }
     }
