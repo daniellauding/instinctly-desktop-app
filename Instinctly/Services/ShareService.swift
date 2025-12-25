@@ -109,7 +109,8 @@ class ShareService: ObservableObject {
         description: String? = nil,
         annotations: [Annotation] = [],
         isPublic: Bool? = nil,
-        password: String? = nil
+        password: String? = nil,
+        allowComments: Bool = false
     ) async throws -> URL {
         shareLogger.info("☁️ Uploading image to CloudKit for sharing...")
 
@@ -182,6 +183,9 @@ class ShareService: ObservableObject {
             record["passwordHash"] = hashPassword(password)
         }
 
+        // Add comments setting
+        record["allowComments"] = allowComments ? 1 : 0
+
         // Store annotations as JSON
         if !annotations.isEmpty {
             if let annotationData = try? JSONEncoder().encode(annotations),
@@ -225,7 +229,8 @@ class ShareService: ObservableObject {
         description: String? = nil,
         collection: String? = nil,
         password: String? = nil,
-        isPublic: Bool? = nil
+        isPublic: Bool? = nil,
+        allowComments: Bool = false
     ) async throws -> URL {
         shareLogger.info("☁️ Uploading file to CloudKit for sharing: \(fileURL.lastPathComponent)")
 
@@ -301,6 +306,9 @@ class ShareService: ObservableObject {
             let passwordHash = hashPassword(password)
             record["passwordHash"] = passwordHash
         }
+
+        // Add comments setting
+        record["allowComments"] = allowComments ? 1 : 0
 
         // Upload to public database
         do {
@@ -862,6 +870,7 @@ struct ShareSheet: View {
     @State private var hasExistingPassword = false
     @State private var removePassword = false
     @State private var isPublic = false
+    @State private var allowComments = false
     @AppStorage("defaultSharePublic") private var defaultSharePublic = false
 
     var body: some View {
@@ -1032,6 +1041,9 @@ struct ShareSheet: View {
                     Toggle("Make public (visible on profile)", isOn: $isPublic)
                         .font(.caption)
 
+                    Toggle("Allow comments", isOn: $allowComments)
+                        .font(.caption)
+
                     HStack(spacing: 12) {
                         Button {
                             isEditing = false
@@ -1080,6 +1092,10 @@ struct ShareSheet: View {
 
                     // Public toggle
                     Toggle("Make public (visible on profile)", isOn: $isPublic)
+                        .font(.caption)
+
+                    // Comments toggle
+                    Toggle("Allow comments", isOn: $allowComments)
                         .font(.caption)
 
                     Button {
@@ -1142,7 +1158,8 @@ struct ShareSheet: View {
                     description: shareDescription.isEmpty ? nil : shareDescription,
                     annotations: annotations,
                     isPublic: isPublic,
-                    password: sharePassword.isEmpty ? nil : sharePassword
+                    password: sharePassword.isEmpty ? nil : sharePassword,
+                    allowComments: allowComments
                 )
                 shareURL = url
                 // Extract share ID from URL

@@ -295,6 +295,89 @@ struct MainWindowView: View {
         } message: {
             Text("This will delete the project '\(projectToDelete ?? "")' and remove items from this collection. This action cannot be undone.")
         }
+        .onDrop(of: [.fileURL, .image, .movie, .audio, .pdf, .plainText, .data, .item], isTargeted: nil) { providers in
+            handleFileDrop(providers)
+            return true
+        }
+    }
+
+    // MARK: - File Drop Handling
+
+    private func handleFileDrop(_ providers: [NSItemProvider]) {
+        for provider in providers {
+            // Handle file URLs
+            if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
+                _ = provider.loadObject(ofClass: URL.self) { url, error in
+                    guard let url = url, error == nil else { return }
+                    Task { @MainActor in
+                        await processDroppedFile(url)
+                    }
+                }
+            }
+            // Handle images directly
+            else if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
+                _ = provider.loadObject(ofClass: NSImage.self) { image, error in
+                    guard let image = image as? NSImage, error == nil else { return }
+                    Task { @MainActor in
+                        appState.currentImage = image
+                        appState.annotations = []
+                        openWindow(id: "editor", value: UUID())
+                    }
+                }
+            }
+        }
+    }
+
+    private func processDroppedFile(_ url: URL) async {
+        let ext = url.pathExtension.lowercased()
+        print("📁 MainWindow drop: \(url.lastPathComponent) (ext: \(ext))")
+
+        // Image files - open in editor
+        if ["png", "jpg", "jpeg", "gif", "tiff", "bmp", "webp", "heic"].contains(ext) {
+            if let image = NSImage(contentsOf: url) {
+                appState.currentImage = image
+                appState.annotations = []
+                openWindow(id: "editor", value: UUID())
+            }
+            return
+        }
+
+        // Video/Audio files - save to library and share
+        if ["mp4", "mov", "m4v", "avi", "mp3", "wav", "m4a", "aac"].contains(ext) {
+            do {
+                let itemType: LibraryItem.ItemType = ["mp3", "wav", "m4a", "aac"].contains(ext) ? .voiceRecording : .recording
+                let item = try libraryService.saveRecording(from: url, type: itemType, name: url.deletingPathExtension().lastPathComponent, collection: selectedCollection ?? "Screenshots")
+                print("✅ Saved dropped file to library: \(item.name)")
+                await showSharePrompt(for: url, title: item.name)
+            } catch {
+                print("❌ Failed to save dropped file: \(error)")
+            }
+            return
+        }
+
+        // All other files (pdf, md, txt, zip, etc.) - upload directly
+        print("📤 Uploading file: \(url.lastPathComponent)")
+        await showSharePrompt(for: url, title: url.deletingPathExtension().lastPathComponent)
+    }
+
+    private func showSharePrompt(for url: URL, title: String) async {
+        do {
+            let shareURL = try await ShareService.shared.uploadFileAndGetShareableLink(
+                fileURL: url,
+                title: title,
+                isPublic: true
+            )
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(shareURL.absoluteString, forType: .string)
+
+            await NotificationHelper.showNotification(
+                title: "File Shared!",
+                body: "Link copied to clipboard: \(title)"
+            )
+            print("✅ File shared: \(shareURL)")
+        } catch {
+            print("❌ Failed to share file: \(error)")
+        }
     }
 
     // MARK: - Project Management

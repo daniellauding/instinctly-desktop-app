@@ -1,10 +1,14 @@
 import SwiftUI
 import ScreenCaptureKit
+import UniformTypeIdentifiers
 
 struct MenuBarView: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.openWindow) private var openWindow
     @StateObject private var captureService = ScreenCaptureService()
+    @State private var isDragOver = false
+    @State private var isUploading = false
+    @State private var uploadStatus = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -160,8 +164,105 @@ struct MenuBarView: View {
                 .padding(.vertical, 8)
             }
             .buttonStyle(.plain)
+
+            // Drop Zone
+            if isDragOver || isUploading {
+                Divider()
+                VStack(spacing: 8) {
+                    if isUploading {
+                        ProgressView()
+                            .scaleEffect(0.8)
+                        Text(uploadStatus)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    } else {
+                        Image(systemName: "arrow.down.doc.fill")
+                            .font(.title2)
+                            .foregroundColor(.accentColor)
+                        Text("Drop to share")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 16)
+                .background(Color.accentColor.opacity(0.1))
+                .cornerRadius(8)
+                .padding(.horizontal, 8)
+                .padding(.bottom, 8)
+            }
         }
         .frame(width: 280)
+        .onDrop(of: [.fileURL, .image, .movie, .audio, .pdf, .plainText, .data, .item], isTargeted: $isDragOver) { providers in
+            handleMenuBarDrop(providers)
+            return true
+        }
+    }
+
+    // MARK: - Drop Handling
+
+    private func handleMenuBarDrop(_ providers: [NSItemProvider]) {
+        for provider in providers {
+            if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
+                _ = provider.loadObject(ofClass: URL.self) { url, error in
+                    guard let url = url, error == nil else { return }
+                    Task { @MainActor in
+                        await processMenuBarDroppedFile(url)
+                    }
+                }
+            } else if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
+                _ = provider.loadObject(ofClass: NSImage.self) { image, error in
+                    guard let image = image as? NSImage, error == nil else { return }
+                    Task { @MainActor in
+                        appState.currentImage = image
+                        appState.annotations = []
+                        openWindow(id: "editor", value: UUID())
+                    }
+                }
+            }
+        }
+    }
+
+    private func processMenuBarDroppedFile(_ url: URL) async {
+        let ext = url.pathExtension.lowercased()
+        print("📁 MenuBar drop: \(url.lastPathComponent) (ext: \(ext))")
+
+        // Image files - open in editor
+        if ["png", "jpg", "jpeg", "gif", "tiff", "bmp", "webp", "heic"].contains(ext) {
+            if let image = NSImage(contentsOf: url) {
+                appState.currentImage = image
+                appState.annotations = []
+                openWindow(id: "editor", value: UUID())
+            }
+            return
+        }
+
+        // All other files (pdf, md, txt, mp4, mp3, zip, etc.) - upload and share directly
+        isUploading = true
+        uploadStatus = "Uploading \(url.lastPathComponent)..."
+
+        do {
+            let shareURL = try await ShareService.shared.uploadFileAndGetShareableLink(
+                fileURL: url,
+                title: url.deletingPathExtension().lastPathComponent,
+                isPublic: true
+            )
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(shareURL.absoluteString, forType: .string)
+            uploadStatus = "✓ Link copied!"
+            print("✅ Shared: \(shareURL)")
+
+            // Reset after delay
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            isUploading = false
+            uploadStatus = ""
+        } catch {
+            print("❌ Upload failed: \(error)")
+            uploadStatus = "Failed: \(error.localizedDescription)"
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            isUploading = false
+            uploadStatus = ""
+        }
     }
 
     // MARK: - Placeholder Data
