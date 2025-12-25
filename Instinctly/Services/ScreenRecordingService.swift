@@ -184,6 +184,10 @@ class ScreenRecordingService: NSObject, ObservableObject {
     // Preview callback - called when recording stops to show preview
     var onRecordingComplete: ((URL) -> Void)?
 
+    // Webcam capture
+    private var webcamManager: WebcamCaptureManager?
+    private var webcamPreviewWindow: WebcamPreviewWindowController?
+
     override init() {
         super.init()
         recordLogger.info("🎬 ScreenRecordingService initialized")
@@ -325,6 +329,11 @@ class ScreenRecordingService: NSObject, ObservableObject {
                 showRecordingOverlay(for: region)
             }
 
+            // Start webcam capture if enabled
+            if configuration.enableWebcam {
+                await startWebcamCapture()
+            }
+
             state = .recording(duration: 0)
             recordLogger.info("✅ Recording started")
 
@@ -396,6 +405,7 @@ class ScreenRecordingService: NSObject, ObservableObject {
         // Hide overlays and panels
         hideRecordingOverlay()
         FloatingRecordingPanelController.shared.hidePanel()
+        stopWebcamCapture()
 
         // Handle voice-only recording
         if configuration.captureMode == .voiceOnly {
@@ -535,6 +545,7 @@ class ScreenRecordingService: NSObject, ObservableObject {
         timer?.invalidate()
         hideRecordingOverlay()
         FloatingRecordingPanelController.shared.hidePanel()
+        stopWebcamCapture()
 
         // Handle voice-only recording
         if configuration.captureMode == .voiceOnly {
@@ -887,6 +898,62 @@ class ScreenRecordingService: NSObject, ObservableObject {
         formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
         return formatter.string(from: Date())
     }
+
+    // MARK: - Webcam Capture
+
+    private func startWebcamCapture() async {
+        recordLogger.info("📹 Starting webcam capture...")
+
+        // Check camera permission
+        let hasPermission = await CameraPermission.checkAndRequest()
+        guard hasPermission else {
+            recordLogger.warning("⚠️ Camera permission denied, skipping webcam")
+            return
+        }
+
+        // Create webcam manager
+        webcamManager = WebcamCaptureManager()
+
+        do {
+            try webcamManager?.startCapture()
+            recordLogger.info("✅ Webcam capture started")
+
+            // Show webcam preview window
+            showWebcamPreview()
+        } catch {
+            recordLogger.error("❌ Failed to start webcam: \(error.localizedDescription)")
+            webcamManager = nil
+        }
+    }
+
+    private func stopWebcamCapture() {
+        webcamManager?.stopCapture()
+        webcamManager = nil
+        hideWebcamPreview()
+        recordLogger.info("📹 Webcam capture stopped")
+    }
+
+    private func showWebcamPreview() {
+        let position = configuration.webcamPosition
+        let size = configuration.webcamSize
+
+        webcamPreviewWindow = WebcamPreviewWindowController(
+            position: position,
+            size: size,
+            webcamManager: webcamManager!
+        )
+        webcamPreviewWindow?.showWindow(nil)
+    }
+
+    private func hideWebcamPreview() {
+        webcamPreviewWindow?.close()
+        webcamPreviewWindow = nil
+    }
+
+    /// Get current webcam frame for compositing (if enabled)
+    func getCurrentWebcamFrame() -> CGImage? {
+        return webcamManager?.currentFrame
+    }
 }
 
 // MARK: - Stream Output Handler
@@ -979,6 +1046,207 @@ class RecordingBorderView: NSView {
 
     deinit {
         pulseAnimation?.invalidate()
+    }
+}
+
+// MARK: - Webcam Capture Manager
+class WebcamCaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutputSampleBufferDelegate {
+    private var captureSession: AVCaptureSession?
+    private var videoOutput: AVCaptureVideoDataOutput?
+    private let sessionQueue = DispatchQueue(label: "com.instinctly.webcam.session")
+
+    @Published var currentFrame: CGImage?
+    @Published var isCapturing = false
+
+    override init() {
+        super.init()
+        recordLogger.info("📹 WebcamCaptureManager initialized")
+    }
+
+    func startCapture() throws {
+        recordLogger.info("📹 Starting webcam capture session...")
+
+        captureSession = AVCaptureSession()
+        captureSession?.sessionPreset = .medium
+
+        // Get default video device (FaceTime camera)
+        guard let videoDevice = AVCaptureDevice.default(for: .video) else {
+            recordLogger.error("❌ No video device available")
+            throw WebcamError.noDeviceAvailable
+        }
+
+        recordLogger.info("📹 Using video device: \(videoDevice.localizedName)")
+
+        // Create input
+        let videoInput = try AVCaptureDeviceInput(device: videoDevice)
+        guard captureSession?.canAddInput(videoInput) == true else {
+            throw WebcamError.cannotAddInput
+        }
+        captureSession?.addInput(videoInput)
+
+        // Create output
+        videoOutput = AVCaptureVideoDataOutput()
+        videoOutput?.videoSettings = [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
+        ]
+        videoOutput?.setSampleBufferDelegate(self, queue: sessionQueue)
+
+        guard captureSession?.canAddOutput(videoOutput!) == true else {
+            throw WebcamError.cannotAddOutput
+        }
+        captureSession?.addOutput(videoOutput!)
+
+        // Start capture on background queue
+        sessionQueue.async { [weak self] in
+            self?.captureSession?.startRunning()
+            DispatchQueue.main.async {
+                self?.isCapturing = true
+                recordLogger.info("✅ Webcam capture session started")
+            }
+        }
+    }
+
+    func stopCapture() {
+        sessionQueue.async { [weak self] in
+            self?.captureSession?.stopRunning()
+            DispatchQueue.main.async {
+                self?.isCapturing = false
+                self?.currentFrame = nil
+                recordLogger.info("📹 Webcam capture session stopped")
+            }
+        }
+        captureSession = nil
+        videoOutput = nil
+    }
+
+    // AVCaptureVideoDataOutputSampleBufferDelegate
+    func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        guard let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+
+        let ciImage = CIImage(cvPixelBuffer: imageBuffer)
+        let context = CIContext()
+
+        if let cgImage = context.createCGImage(ciImage, from: ciImage.extent) {
+            DispatchQueue.main.async { [weak self] in
+                self?.currentFrame = cgImage
+            }
+        }
+    }
+}
+
+// MARK: - Webcam Errors
+enum WebcamError: LocalizedError {
+    case noDeviceAvailable
+    case cannotAddInput
+    case cannotAddOutput
+    case captureSessionFailed
+
+    var errorDescription: String? {
+        switch self {
+        case .noDeviceAvailable: return "No webcam device available"
+        case .cannotAddInput: return "Cannot add video input to capture session"
+        case .cannotAddOutput: return "Cannot add video output to capture session"
+        case .captureSessionFailed: return "Webcam capture session failed"
+        }
+    }
+}
+
+// MARK: - Webcam Preview Window
+import SwiftUI
+
+class WebcamPreviewWindowController: NSWindowController {
+    private var webcamManager: WebcamCaptureManager
+
+    init(position: RecordingConfiguration.WebcamPosition, size: RecordingConfiguration.WebcamSize, webcamManager: WebcamCaptureManager) {
+        self.webcamManager = webcamManager
+
+        // Calculate window size based on configuration
+        let screenSize = NSScreen.main?.visibleFrame.size ?? CGSize(width: 1920, height: 1080)
+        let webcamWidth = screenSize.width * size.percentage
+        let webcamHeight = webcamWidth * 0.75 // 4:3 aspect ratio
+
+        // Calculate position
+        let screenFrame = NSScreen.main?.visibleFrame ?? .zero
+        let alignment = position.alignment
+        let x = screenFrame.origin.x + (screenFrame.width - webcamWidth) * alignment.x
+        let y = screenFrame.origin.y + (screenFrame.height - webcamHeight) * alignment.y
+
+        let windowRect = CGRect(x: x, y: y, width: webcamWidth, height: webcamHeight)
+
+        let window = NSWindow(
+            contentRect: windowRect,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+
+        window.level = .floating
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.hasShadow = true
+        window.isMovableByWindowBackground = true
+
+        super.init(window: window)
+
+        // Add SwiftUI view
+        let hostingView = NSHostingView(rootView: WebcamPreviewView(webcamManager: webcamManager))
+        window.contentView = hostingView
+
+        recordLogger.info("📹 Webcam preview window created at position: \(position.rawValue)")
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+}
+
+// MARK: - Webcam Preview View
+struct WebcamPreviewView: View {
+    @ObservedObject var webcamManager: WebcamCaptureManager
+
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack {
+                // Background with rounded corners
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(Color.black)
+
+                // Webcam feed
+                if let frame = webcamManager.currentFrame {
+                    Image(decorative: frame, scale: 1.0)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .frame(width: geometry.size.width, height: geometry.size.height)
+                        .scaleEffect(x: -1, y: 1) // Mirror the image
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                } else {
+                    // Loading state
+                    VStack {
+                        ProgressView()
+                            .scaleEffect(0.8)
+                        Text("Camera")
+                            .font(.caption)
+                            .foregroundColor(.white.opacity(0.7))
+                    }
+                }
+
+                // Recording indicator
+                VStack {
+                    HStack {
+                        Circle()
+                            .fill(Color.red)
+                            .frame(width: 8, height: 8)
+                        Spacer()
+                    }
+                    .padding(8)
+                    Spacer()
+                }
+            }
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(Color.white.opacity(0.3), lineWidth: 2)
+            )
+        }
     }
 }
 

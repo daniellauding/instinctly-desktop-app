@@ -91,6 +91,13 @@ struct MenuBarView: View {
                 )
 
                 RecordingMenuButton(
+                    title: "Record with Webcam",
+                    icon: "camera.fill",
+                    mode: .fullScreen,
+                    withWebcam: true
+                )
+
+                RecordingMenuButton(
                     title: "Voice Only",
                     icon: "mic.fill",
                     mode: .voiceOnly
@@ -354,25 +361,29 @@ struct RecordingMenuButton: View {
 
         // Set mode and start
         recordingService.configuration.captureMode = mode
-        
+
         // Set output format - GIF only for GIF button, otherwise MP4
         if forceGif {
             recordingService.configuration.outputFormat = .gif
         } else {
             recordingService.configuration.outputFormat = .mp4
         }
-        
-        // Enable webcam if this is the webcam button
+
+        // Enable/disable webcam
+        recordingService.configuration.enableWebcam = withWebcam
+
+        // If webcam enabled, check permission first
         if withWebcam {
-            recordingService.configuration.enableWebcam = true
-            // Check camera permission
-            Task {
+            Task { @MainActor in
                 let hasPermission = await CameraPermission.checkAndRequest()
                 if !hasPermission {
                     print("❌ Camera permission denied")
-                    return
+                    recordingService.configuration.enableWebcam = false
+                    // Continue without webcam
                 }
+                await startRecordingWithMode(mode)
             }
+            return
         }
 
         switch mode {
@@ -435,7 +446,51 @@ struct RecordingMenuButton: View {
         let seconds = Int(time) % 60
         return String(format: "%d:%02d", minutes, seconds)
     }
-    
+
+    /// Start recording with the specified mode (used for webcam path)
+    private func startRecordingWithMode(_ mode: RecordingConfiguration.CaptureMode) async {
+        switch mode {
+        case .region:
+            print("🎬 MenuBar: Starting region selection (with webcam)...")
+            let selector = RecordingRegionSelector()
+            if let region = await selector.selectRegion() {
+                recordingService.configuration.region = region
+                do {
+                    try await recordingService.startRecording()
+                    print("🎬 MenuBar: Recording started with webcam!")
+                } catch {
+                    print("❌ MenuBar: Failed to start recording: \(error)")
+                }
+            } else {
+                recordingService.resetToIdle()
+            }
+
+        case .window:
+            print("🎬 MenuBar: Starting window selection (with webcam)...")
+            let selector = RecordingWindowSelector()
+            if let result = await selector.selectWindow() {
+                recordingService.configuration.windowID = result.windowID
+                do {
+                    try await recordingService.startRecording()
+                    print("🎬 MenuBar: Recording started with webcam!")
+                } catch {
+                    print("❌ MenuBar: Failed to start recording: \(error)")
+                }
+            } else {
+                recordingService.resetToIdle()
+            }
+
+        case .fullScreen, .voiceOnly:
+            print("🎬 MenuBar: Starting \(mode.rawValue) recording (with webcam)...")
+            do {
+                try await recordingService.startRecording()
+                print("🎬 MenuBar: Recording started with webcam!")
+            } catch {
+                print("❌ MenuBar: Failed to start recording: \(error)")
+            }
+        }
+    }
+
     private func showRecordingResult(url: URL) {
         do {
             // Determine the type from file extension
