@@ -181,16 +181,20 @@ struct MenuBarView: View {
     }
 
     private func captureWindow() {
-        Task {
-            do {
-                let image = try await captureService.captureWindow()
-                await MainActor.run {
+        Task { @MainActor in
+            // Show window picker first
+            let selector = CaptureWindowSelector()
+            if let scWindow = await selector.selectWindow() {
+                do {
+                    let image = try await captureService.captureWindow(scWindow)
                     appState.currentImage = image
                     appState.annotations = []
                     openWindow(id: "editor", value: UUID())
+                } catch {
+                    print("Capture failed: \(error)")
                 }
-            } catch {
-                print("Capture failed: \(error)")
+            } else {
+                print("Window selection cancelled")
             }
         }
     }

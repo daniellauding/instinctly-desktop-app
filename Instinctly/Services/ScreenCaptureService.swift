@@ -286,6 +286,249 @@ class ScreenCaptureService: ObservableObject {
     }
 }
 
+// MARK: - Capture Window Selector
+
+import SwiftUI
+
+@MainActor
+class CaptureWindowSelector {
+    private var activeController: CaptureWindowSelectionController?
+
+    func selectWindow() async -> SCWindow? {
+        captureLogger.info("🪟 Starting capture window selection")
+
+        return await withCheckedContinuation { continuation in
+            var hasResumed = false
+
+            let controller = CaptureWindowSelectionController { [weak self] result in
+                guard !hasResumed else {
+                    captureLogger.warning("⚠️ Continuation already resumed, ignoring")
+                    return
+                }
+                hasResumed = true
+                captureLogger.info("✅ Window selection complete: \(result?.title ?? "cancelled")")
+                self?.activeController = nil
+                continuation.resume(returning: result)
+            }
+
+            self.activeController = controller
+            controller.show()
+        }
+    }
+}
+
+// MARK: - Capture Window Selection Controller
+@MainActor
+class CaptureWindowSelectionController: NSWindowController {
+    private var onComplete: ((SCWindow?) -> Void)?
+    private var hasClosed = false
+
+    convenience init(onComplete: @escaping (SCWindow?) -> Void) {
+        captureLogger.info("🎯 Initializing CaptureWindowSelectionController")
+
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 500),
+            styleMask: [.titled, .closable, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+
+        panel.title = "Select Window to Capture"
+        panel.level = .floating
+        panel.isFloatingPanel = true
+        panel.hidesOnDeactivate = false
+        panel.becomesKeyOnlyIfNeeded = true
+
+        self.init(window: panel)
+        self.onComplete = onComplete
+
+        let hostingView = NSHostingView(rootView: CaptureWindowSelectionView(
+            onSelect: { [weak self] scWindow in
+                self?.handleComplete(scWindow)
+            },
+            onCancel: { [weak self] in
+                self?.handleComplete(nil)
+            }
+        ))
+        panel.contentView = hostingView
+
+        // Center on screen
+        if let screen = NSScreen.main {
+            let x = screen.visibleFrame.midX - 210
+            let y = screen.visibleFrame.midY - 250
+            panel.setFrameOrigin(NSPoint(x: x, y: y))
+        }
+
+        captureLogger.info("✅ CaptureWindowSelectionController initialized")
+    }
+
+    func show() {
+        captureLogger.info("📺 Showing capture window selection")
+        showWindow(nil)
+        window?.orderFrontRegardless()
+        window?.makeKey()
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func handleComplete(_ result: SCWindow?) {
+        guard !hasClosed else { return }
+        hasClosed = true
+
+        captureLogger.info("🎬 Closing window picker")
+        window?.orderOut(nil)
+        close()
+
+        let completion = onComplete
+        onComplete = nil
+
+        DispatchQueue.main.async {
+            completion?(result)
+        }
+    }
+}
+
+// MARK: - Capture Window Selection View
+struct CaptureWindowSelectionView: View {
+    let onSelect: (SCWindow) -> Void
+    let onCancel: () -> Void
+
+    @State private var windows: [(window: SCWindow, title: String, appName: String, icon: NSImage?)] = []
+    @State private var isLoading = true
+
+    var body: some View {
+        VStack(spacing: 16) {
+            // Header
+            HStack {
+                Image(systemName: "macwindow")
+                    .foregroundColor(.blue)
+                Text("Select Window to Capture")
+                    .font(.headline)
+                Spacer()
+                Button("Cancel") { onCancel() }
+                    .keyboardShortcut(.escape, modifiers: [])
+            }
+
+            Divider()
+
+            if isLoading {
+                VStack {
+                    ProgressView()
+                    Text("Loading windows...")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if windows.isEmpty {
+                VStack(spacing: 8) {
+                    Image(systemName: "macwindow")
+                        .font(.largeTitle)
+                        .foregroundColor(.secondary)
+                    Text("No windows available")
+                        .foregroundColor(.secondary)
+                    Text("Open an application window and try again")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 8) {
+                        ForEach(windows, id: \.window.windowID) { item in
+                            CaptureWindowRow(
+                                title: item.title,
+                                appName: item.appName,
+                                icon: item.icon
+                            ) {
+                                onSelect(item.window)
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 4)
+                }
+            }
+        }
+        .padding(20)
+        .frame(width: 400, height: 450)
+        .onAppear {
+            loadWindows()
+        }
+    }
+
+    private func loadWindows() {
+        Task {
+            do {
+                let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
+                let windowList = content.windows.compactMap { window -> (window: SCWindow, title: String, appName: String, icon: NSImage?)? in
+                    guard let title = window.title, !title.isEmpty,
+                          window.frame.width > 50, window.frame.height > 50,
+                          let app = window.owningApplication,
+                          app.bundleIdentifier != Bundle.main.bundleIdentifier else {
+                        return nil
+                    }
+                    let appName = app.applicationName
+                    let icon = NSRunningApplication(processIdentifier: app.processID)?.icon
+                    return (window, title, appName, icon)
+                }
+
+                await MainActor.run {
+                    windows = windowList
+                    isLoading = false
+                }
+            } catch {
+                await MainActor.run {
+                    isLoading = false
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Capture Window Row
+struct CaptureWindowRow: View {
+    let title: String
+    let appName: String
+    let icon: NSImage?
+    let onSelect: () -> Void
+
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: onSelect) {
+            HStack(spacing: 12) {
+                if let icon = icon {
+                    Image(nsImage: icon)
+                        .resizable()
+                        .frame(width: 36, height: 36)
+                } else {
+                    Image(systemName: "macwindow")
+                        .font(.title2)
+                        .frame(width: 36, height: 36)
+                }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.system(size: 13))
+                        .lineLimit(1)
+                    Text(appName)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+
+                Spacer()
+
+                Image(systemName: "camera.fill")
+                    .foregroundColor(.blue)
+                    .opacity(isHovered ? 1 : 0.5)
+            }
+            .padding(10)
+            .background(isHovered ? Color.blue.opacity(0.1) : Color.secondary.opacity(0.05))
+            .cornerRadius(8)
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+    }
+}
+
 // MARK: - Capture Errors
 enum CaptureError: LocalizedError {
     case noDisplayAvailable
