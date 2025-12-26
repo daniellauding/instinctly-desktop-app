@@ -904,14 +904,22 @@ class ScreenRecordingService: NSObject, ObservableObject {
     private func startWebcamCapture() async {
         recordLogger.info("📹 Starting webcam capture...")
 
-        // Check camera permission
+        // Check camera permission FIRST before doing anything
         let hasPermission = await CameraPermission.checkAndRequest()
         guard hasPermission else {
             recordLogger.warning("⚠️ Camera permission denied, skipping webcam")
+            configuration.enableWebcam = false // Disable to prevent retry
+            return
+        }
+        
+        // Verify permission again to be absolutely sure
+        guard CameraPermission.hasPermission() else {
+            recordLogger.error("❌ Camera permission not granted despite request")
+            configuration.enableWebcam = false
             return
         }
 
-        // Create webcam manager
+        // Create webcam manager only after confirmed permission
         webcamManager = WebcamCaptureManager()
 
         do {
@@ -1070,6 +1078,12 @@ class WebcamCaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
 
     func startCapture() throws {
         recordLogger.info("📹 Starting webcam capture session...")
+        
+        // CRITICAL: Check permission one final time before creating ANY camera objects
+        guard AVCaptureDevice.authorizationStatus(for: .video) == .authorized else {
+            recordLogger.error("❌ Camera permission not authorized - cannot start capture")
+            throw WebcamError.noDeviceAvailable
+        }
         
         // Ensure we're starting fresh
         stopCapture()

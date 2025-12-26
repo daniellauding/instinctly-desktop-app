@@ -13,22 +13,32 @@ class CameraPermission {
     
     /// Request camera permission
     static func requestPermission() async -> Bool {
-        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        let currentStatus = AVCaptureDevice.authorizationStatus(for: .video)
+        print("📹 Camera permission status: \(currentStatus.rawValue)")
+        
+        switch currentStatus {
         case .authorized:
+            print("📹 Camera already authorized")
             return true
             
         case .notDetermined:
+            print("📹 Requesting camera permission...")
             return await withCheckedContinuation { continuation in
                 AVCaptureDevice.requestAccess(for: .video) { granted in
-                    continuation.resume(returning: granted)
+                    print("📹 Camera permission request result: \(granted)")
+                    DispatchQueue.main.async {
+                        continuation.resume(returning: granted)
+                    }
                 }
             }
             
         case .denied, .restricted:
+            print("📹 Camera permission denied/restricted")
             showPermissionAlert()
             return false
             
         @unknown default:
+            print("📹 Unknown camera permission status")
             return false
         }
     }
