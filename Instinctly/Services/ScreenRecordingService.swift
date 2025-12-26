@@ -1062,13 +1062,21 @@ class WebcamCaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
         super.init()
         recordLogger.info("📹 WebcamCaptureManager initialized")
     }
+    
+    deinit {
+        recordLogger.info("📹 WebcamCaptureManager deinitializing...")
+        stopCapture()
+    }
 
     func startCapture() throws {
         recordLogger.info("📹 Starting webcam capture session...")
-
-        captureSession = AVCaptureSession()
-        captureSession?.sessionPreset = .medium
-
+        
+        // Ensure we're starting fresh
+        stopCapture()
+        
+        let session = AVCaptureSession()
+        session.sessionPreset = .medium
+        
         // Get default video device (FaceTime camera)
         guard let videoDevice = AVCaptureDevice.default(for: .video) else {
             recordLogger.error("❌ No video device available")
@@ -1077,58 +1085,103 @@ class WebcamCaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
 
         recordLogger.info("📹 Using video device: \(videoDevice.localizedName)")
 
-        // Create input
-        let videoInput = try AVCaptureDeviceInput(device: videoDevice)
-        guard captureSession?.canAddInput(videoInput) == true else {
-            throw WebcamError.cannotAddInput
-        }
-        captureSession?.addInput(videoInput)
-
-        // Create output
-        videoOutput = AVCaptureVideoDataOutput()
-        videoOutput?.videoSettings = [
-            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
-        ]
-        videoOutput?.setSampleBufferDelegate(self, queue: sessionQueue)
-
-        guard captureSession?.canAddOutput(videoOutput!) == true else {
-            throw WebcamError.cannotAddOutput
-        }
-        captureSession?.addOutput(videoOutput!)
-
-        // Start capture on background queue
-        sessionQueue.async { [weak self] in
-            self?.captureSession?.startRunning()
-            DispatchQueue.main.async {
-                self?.isCapturing = true
-                recordLogger.info("✅ Webcam capture session started")
+        do {
+            // Create input
+            let videoInput = try AVCaptureDeviceInput(device: videoDevice)
+            guard session.canAddInput(videoInput) else {
+                throw WebcamError.cannotAddInput
             }
+            session.addInput(videoInput)
+
+            // Create output
+            let output = AVCaptureVideoDataOutput()
+            output.videoSettings = [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
+            ]
+            output.setSampleBufferDelegate(self, queue: sessionQueue)
+            
+            // Prevent frame drops to avoid crashes
+            output.alwaysDiscardsLateVideoFrames = true
+
+            guard session.canAddOutput(output) else {
+                throw WebcamError.cannotAddOutput
+            }
+            session.addOutput(output)
+            
+            // Store references only after successful setup
+            self.captureSession = session
+            self.videoOutput = output
+
+            // Start capture on background queue with proper error handling
+            sessionQueue.async { [weak self] in
+                guard let self = self, let session = self.captureSession else { return }
+                
+                do {
+                    if !session.isRunning {
+                        session.startRunning()
+                        DispatchQueue.main.async {
+                            self.isCapturing = true
+                            recordLogger.info("✅ Webcam capture session started")
+                        }
+                    }
+                } catch {
+                    DispatchQueue.main.async {
+                        recordLogger.error("❌ Failed to start webcam session: \(error)")
+                        self.stopCapture()
+                    }
+                }
+            }
+        } catch {
+            recordLogger.error("❌ Failed to setup webcam: \(error)")
+            throw error
         }
     }
 
     func stopCapture() {
         sessionQueue.async { [weak self] in
-            self?.captureSession?.stopRunning()
+            guard let self = self else { return }
+            
+            if let session = self.captureSession, session.isRunning {
+                session.stopRunning()
+                
+                // Remove all inputs and outputs to prevent crashes
+                for input in session.inputs {
+                    session.removeInput(input)
+                }
+                for output in session.outputs {
+                    session.removeOutput(output)
+                }
+            }
+            
             DispatchQueue.main.async {
-                self?.isCapturing = false
-                self?.currentFrame = nil
-                recordLogger.info("📹 Webcam capture session stopped")
+                self.isCapturing = false
+                self.currentFrame = nil
+                self.captureSession = nil
+                self.videoOutput = nil
+                recordLogger.info("📹 Webcam capture session stopped and cleaned up")
             }
         }
-        captureSession = nil
-        videoOutput = nil
     }
 
     // AVCaptureVideoDataOutputSampleBufferDelegate
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        // Early return if not capturing to prevent unnecessary processing
+        guard isCapturing else { return }
         guard let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 
-        let ciImage = CIImage(cvPixelBuffer: imageBuffer)
-        let context = CIContext()
+        // Use autoreleasepool to manage memory properly
+        autoreleasepool {
+            let ciImage = CIImage(cvPixelBuffer: imageBuffer)
+            
+            // Use a static context to avoid creating new contexts repeatedly
+            let context = CIContext(options: [.useSoftwareRenderer: false])
 
-        if let cgImage = context.createCGImage(ciImage, from: ciImage.extent) {
-            DispatchQueue.main.async { [weak self] in
-                self?.currentFrame = cgImage
+            if let cgImage = context.createCGImage(ciImage, from: ciImage.extent) {
+                DispatchQueue.main.async { [weak self] in
+                    // Only update if still capturing to avoid race conditions
+                    guard let self = self, self.isCapturing else { return }
+                    self.currentFrame = cgImage
+                }
             }
         }
     }

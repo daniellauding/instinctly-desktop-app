@@ -1227,7 +1227,6 @@ struct RecentFilesGridView: View {
         // Try multiple potential temp directories
         let possibleTempDirs = [
             containerURL,
-            URL(fileURLWithPath: "/Users/daniellauding/Library/Containers/com.instinctly.app/Data/tmp/"),
             FileManager.default.temporaryDirectory
         ].compactMap { $0 }
         

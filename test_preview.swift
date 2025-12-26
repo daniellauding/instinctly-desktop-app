@@ -4,7 +4,7 @@ import AppKit
 import SwiftUI
 
 // Create a test video file
-let testURL = URL(fileURLWithPath: "/Users/daniellauding/Library/Containers/com.instinctly.app/Data/tmp/Instinctly_2025-12-22_13-02-28.mp4")
+let testURL = FileManager.default.temporaryDirectory.appendingPathComponent("Instinctly_2025-12-22_13-02-28.mp4")
 
 // Show the preview panel
 class TestApp: NSObject, NSApplicationDelegate {
