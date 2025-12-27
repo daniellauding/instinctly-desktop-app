@@ -95,8 +95,22 @@ struct MenuBarView: View {
                 )
 
                 RecordingMenuButton(
-                    title: "Record with Webcam",
-                    icon: "camera.fill",
+                    title: "Record Region with Webcam",
+                    icon: "rectangle.dashed.and.paperclip",
+                    mode: .region,
+                    withWebcam: true
+                )
+
+                RecordingMenuButton(
+                    title: "Record Selected Window with Webcam",
+                    icon: "macwindow.and.cursorarrow",
+                    mode: .window,
+                    withWebcam: true
+                )
+
+                RecordingMenuButton(
+                    title: "Record Full Screen with Webcam",
+                    icon: "rectangle.inset.filled.and.person.filled",
                     mode: .fullScreen,
                     withWebcam: true
                 )

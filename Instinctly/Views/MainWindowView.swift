@@ -107,7 +107,9 @@ struct MainWindowView: View {
                     SidebarRecordButton(title: "Record Window", icon: "macwindow.badge.plus", mode: .window)
                     SidebarRecordButton(title: "Record Full Screen", icon: "rectangle.inset.filled.badge.record", mode: .fullScreen)
                     SidebarRecordButton(title: "Record GIF", icon: "photo.stack", mode: .region, forceGif: true)
-                    SidebarRecordButton(title: "Record with Webcam", icon: "video.fill", mode: .region, withWebcam: true)
+                    SidebarRecordButton(title: "Record Region with Webcam", icon: "rectangle.dashed.and.paperclip", mode: .region, withWebcam: true)
+                    SidebarRecordButton(title: "Record Selected Window with Webcam", icon: "macwindow.and.cursorarrow", mode: .window, withWebcam: true)
+                    SidebarRecordButton(title: "Record Full Screen with Webcam", icon: "rectangle.inset.filled.and.person.filled", mode: .fullScreen, withWebcam: true)
                     SidebarRecordButton(title: "Voice Only", icon: "mic.fill", mode: .voiceOnly)
                 }
 
