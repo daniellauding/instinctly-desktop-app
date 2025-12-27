@@ -1130,18 +1130,15 @@ class WebcamCaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             sessionQueue.async { [weak self] in
                 guard let self = self, let session = self.captureSession else { return }
                 
-                do {
-                    if !session.isRunning {
-                        session.startRunning()
-                        DispatchQueue.main.async {
-                            self.isCapturing = true
-                            recordLogger.info("✅ Webcam capture session started")
-                        }
-                    }
-                } catch {
+                if !session.isRunning {
+                    session.startRunning()
+                    
+                    // Wait a moment for session to stabilize
+                    Thread.sleep(forTimeInterval: 0.5)
+                    
                     DispatchQueue.main.async {
-                        recordLogger.error("❌ Failed to start webcam session: \(error)")
-                        self.stopCapture()
+                        self.isCapturing = true
+                        recordLogger.info("✅ Webcam capture session started")
                     }
                 }
             }
@@ -1181,14 +1178,33 @@ class WebcamCaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         // Early return if not capturing to prevent unnecessary processing
         guard isCapturing else { return }
-        guard let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        
+        // Validate sample buffer
+        guard CMSampleBufferIsValid(sampleBuffer) else {
+            recordLogger.debug("📹 Invalid sample buffer received")
+            return
+        }
+        
+        guard let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
+            recordLogger.debug("📹 No image buffer in sample buffer")
+            return
+        }
 
         // Use autoreleasepool to manage memory properly
         autoreleasepool {
             let ciImage = CIImage(cvPixelBuffer: imageBuffer)
             
-            // Use a static context to avoid creating new contexts repeatedly
-            let context = CIContext(options: [.useSoftwareRenderer: false])
+            // Validate image dimensions
+            guard ciImage.extent.width > 0 && ciImage.extent.height > 0 else {
+                recordLogger.debug("📹 Invalid image dimensions: \(ciImage.extent)")
+                return
+            }
+            
+            // Use a context optimized for real-time processing
+            let context = CIContext(options: [
+                .useSoftwareRenderer: false,
+                .priorityRequestLow: true
+            ])
 
             if let cgImage = context.createCGImage(ciImage, from: ciImage.extent) {
                 DispatchQueue.main.async { [weak self] in
