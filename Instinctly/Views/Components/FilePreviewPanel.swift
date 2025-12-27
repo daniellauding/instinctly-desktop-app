@@ -10,6 +10,7 @@ struct FilePreviewPanel: View {
     @State private var isLoading = true
     @State private var previewContent: PreviewContent?
     @State private var showShareSheet = false
+    @State private var showEditSheet = false
     @StateObject private var shareService = ShareService.shared
     
     enum PreviewContent {
@@ -46,6 +47,19 @@ struct FilePreviewPanel: View {
                     
                     // Action buttons
                     HStack(spacing: 12) {
+                        // Edit button for editable formats
+                        if isEditableFormat {
+                            Button(action: { showEditSheet = true }) {
+                                Image(systemName: "scissors")
+                                    .foregroundColor(.white)
+                                    .padding(8)
+                                    .background(.ultraThinMaterial)
+                                    .clipShape(Circle())
+                            }
+                            .buttonStyle(.plain)
+                            .help("Edit Clip")
+                        }
+                        
                         Button(action: shareToCloud) {
                             if shareService.isSharing {
                                 ProgressView()
@@ -202,6 +216,8 @@ struct FilePreviewPanel: View {
                                         .lineLimit(1)
                                         .truncationMode(.middle)
                                     
+                                    CommentCountView(shareURL: shareURL, size: .small)
+                                    
                                     Button(action: { shareService.copyLinkToClipboard(shareURL) }) {
                                         Image(systemName: "doc.on.doc")
                                             .foregroundColor(.white)
@@ -236,6 +252,22 @@ struct FilePreviewPanel: View {
             }
             return false
         }
+        .sheet(isPresented: $showEditSheet) {
+            ClipEditorView(
+                fileURL: fileURL,
+                onSave: { editedURL in
+                    showEditSheet = false
+                },
+                onCancel: {
+                    showEditSheet = false
+                }
+            )
+        }
+    }
+    
+    private var isEditableFormat: Bool {
+        let ext = fileURL.pathExtension.lowercased()
+        return ["mp4", "mov", "gif", "m4a"].contains(ext)
     }
     
     private func shareToCloud() {

@@ -380,7 +380,10 @@ struct MenuButton: View {
 // MARK: - Recent Capture Row
 struct RecentCaptureRow: View {
     let capture: String
-
+    @StateObject private var libraryService = LibraryService.shared
+    @State private var showEditSheet = false
+    @State private var captureURL: URL?
+    
     var body: some View {
         HStack(spacing: 12) {
             RoundedRectangle(cornerRadius: 4)
@@ -397,9 +400,52 @@ struct RecentCaptureRow: View {
             }
 
             Spacer()
+            
+            if let url = captureURL, isEditableFormat(url: url) {
+                Button(action: { showEditSheet = true }) {
+                    Image(systemName: "scissors")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Edit Clip")
+            }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 4)
+        .onTapGesture {
+            if let url = captureURL {
+                NSWorkspace.shared.open(url)
+            }
+        }
+        .onAppear {
+            findCaptureURL()
+        }
+        .sheet(isPresented: $showEditSheet) {
+            if let url = captureURL {
+                ClipEditorView(
+                    fileURL: url,
+                    onSave: { editedURL in
+                        showEditSheet = false
+                    },
+                    onCancel: {
+                        showEditSheet = false
+                    }
+                )
+            }
+        }
+    }
+    
+    private func isEditableFormat(url: URL) -> Bool {
+        let ext = url.pathExtension.lowercased()
+        return ["mp4", "mov", "gif", "m4a"].contains(ext)
+    }
+    
+    private func findCaptureURL() {
+        // Find the most recent file that matches this capture name
+        if let item = libraryService.items.first(where: { $0.name.contains(capture) }) {
+            captureURL = libraryService.fileURL(for: item)
+        }
     }
 }
 

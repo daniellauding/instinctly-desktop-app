@@ -1202,6 +1202,18 @@ struct RecentFilesGridView: View {
         .refreshable {
             loadRecentFiles()
         }
+        .onReceive(NotificationCenter.default.publisher(for: .newRecordingAvailable)) { _ in
+            // Refresh recent files when new recording is available
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                loadRecentFiles()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .recordingSaved)) { _ in
+            // Refresh recent files when recording is saved
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                loadRecentFiles()
+            }
+        }
     }
 
     private func toggleSelection(_ url: URL) {
@@ -1223,42 +1235,46 @@ struct RecentFilesGridView: View {
     private func loadRecentFiles() {
         // Use app's container temp directory instead of system temp directory
         let containerURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?.appendingPathComponent("tmp")
+        let downloadsURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+        let desktopURL = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first
         
-        // Try multiple potential temp directories
-        let possibleTempDirs = [
+        // Try multiple potential directories where Instinctly files might be
+        let possibleDirs = [
             containerURL,
-            FileManager.default.temporaryDirectory
+            FileManager.default.temporaryDirectory,
+            downloadsURL,
+            desktopURL
         ].compactMap { $0 }
         
         var foundFiles: [URL] = []
         
-        for tempDir in possibleTempDirs {
-            print("🔍 Checking temp directory: \(tempDir.path)")
+        for dir in possibleDirs {
+            print("🔍 Checking directory: \(dir.path)")
             
-            guard FileManager.default.fileExists(atPath: tempDir.path) else {
-                print("📁 Directory doesn't exist: \(tempDir.path)")
+            guard FileManager.default.fileExists(atPath: dir.path) else {
+                print("📁 Directory doesn't exist: \(dir.path)")
                 continue
             }
             
             do {
-                let allFiles = try FileManager.default.contentsOfDirectory(at: tempDir, includingPropertiesForKeys: [.contentModificationDateKey])
+                let allFiles = try FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey])
                 
                 // Filter for media files
                 let mediaFiles = allFiles.filter { url in
                     let ext = url.pathExtension.lowercased()
                     return ["gif", "mp4", "mov", "webm", "m4a", "png", "jpg", "jpeg"].contains(ext)
                 }.filter { url in
-                    url.lastPathComponent.hasPrefix("Instinctly_")
+                    let fileName = url.lastPathComponent
+                    // Include files that contain "Instinctly" or "voice_" (for voice recordings)
+                    return fileName.contains("Instinctly") || fileName.hasPrefix("voice_")
                 }
                 
                 foundFiles.append(contentsOf: mediaFiles)
-                print("📄 Found \(mediaFiles.count) files in \(tempDir.path)")
+                print("📄 Found \(mediaFiles.count) files in \(dir.path)")
                 
-                if !mediaFiles.isEmpty {
-                    break // Found files, stop looking
-                }
+                // Don't break - collect from all directories
             } catch {
-                print("❌ Failed to read directory \(tempDir.path): \(error)")
+                print("❌ Failed to read directory \(dir.path): \(error)")
                 continue
             }
         }
@@ -2365,6 +2381,7 @@ struct RecentFileListRow: View {
 
     @State private var thumbnail: NSImage?
     @State private var fileSize: String = ""
+    @State private var showEditSheet = false
     @StateObject private var shareService = ShareService.shared
 
     private var fileType: String {
@@ -2462,6 +2479,14 @@ struct RecentFileListRow: View {
             // Actions
             if !isSelectionMode {
                 HStack(spacing: 8) {
+                    if isEditableFormat {
+                        Button(action: { showEditSheet = true }) {
+                            Image(systemName: "scissors")
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Edit Clip")
+                    }
+                    
                     Button(action: { NSWorkspace.shared.open(fileURL) }) {
                         Image(systemName: "arrow.up.right.square")
                     }
@@ -2496,6 +2521,53 @@ struct RecentFileListRow: View {
             loadThumbnail()
             loadFileSize()
         }
+        .contextMenu {
+            if isEditableFormat {
+                Button {
+                    showEditSheet = true
+                } label: {
+                    Label("Edit Clip...", systemImage: "scissors")
+                }
+                
+                Divider()
+            }
+            
+            Button {
+                NSWorkspace.shared.open(fileURL)
+            } label: {
+                Label("Open", systemImage: "arrow.up.right.square")
+            }
+            
+            Button {
+                NSWorkspace.shared.selectFile(fileURL.path, inFileViewerRootedAtPath: "")
+            } label: {
+                Label("Show in Finder", systemImage: "folder")
+            }
+            
+            Divider()
+            
+            Button(role: .destructive) {
+                deleteFile()
+            } label: {
+                Label("Delete", systemImage: "trash")
+            }
+        }
+        .sheet(isPresented: $showEditSheet) {
+            ClipEditorView(
+                fileURL: fileURL,
+                onSave: { editedURL in
+                    showEditSheet = false
+                },
+                onCancel: {
+                    showEditSheet = false
+                }
+            )
+        }
+    }
+    
+    private var isEditableFormat: Bool {
+        let ext = fileURL.pathExtension.lowercased()
+        return ["mp4", "mov", "gif", "m4a"].contains(ext)
     }
 
     private func formatDate() -> String {
@@ -2542,10 +2614,12 @@ struct RecentFileCard: View {
     @State private var thumbnail: NSImage?
     @State private var showPreview = false
     @State private var showShareSheet = false
+    @State private var showUnifiedShareSheet = false
     @State private var sharePassword = ""
     @State private var usePassword = false
     @State private var sharedURL: URL?
     @State private var showLinkCopied = false
+    @State private var showEditSheet = false
     @StateObject private var shareService = ShareService.shared
 
     private var fileType: String {
@@ -2662,6 +2736,19 @@ struct RecentFileCard: View {
                         .buttonStyle(.plain)
 
                         HStack(spacing: 8) {
+                            // Edit button for editable formats
+                            if isEditableFormat {
+                                Button(action: { showEditSheet = true }) {
+                                    Image(systemName: "scissors")
+                                        .foregroundColor(.white)
+                                        .padding(6)
+                                        .background(.ultraThinMaterial)
+                                        .clipShape(Circle())
+                                }
+                                .buttonStyle(.plain)
+                                .help("Edit Clip")
+                            }
+                            
                             // Share to iCloud
                             Button(action: { showShareSheet = true }) {
                                 if shareService.isSharing {
@@ -2731,6 +2818,47 @@ struct RecentFileCard: View {
             .onTapGesture(count: 2) {
                 openFile()
             }
+            .contextMenu {
+                if isEditableFormat {
+                    Button {
+                        showEditSheet = true
+                    } label: {
+                        Label("Edit Clip...", systemImage: "scissors")
+                    }
+                    
+                    Divider()
+                }
+                
+                Button {
+                    openFile()
+                } label: {
+                    Label("Open", systemImage: "arrow.up.right.square")
+                }
+                
+                Button {
+                    showUnifiedShareSheet = true
+                } label: {
+                    Label("Share to Cloud...", systemImage: "icloud.and.arrow.up")
+                }
+                
+                Button {
+                    copyPath()
+                } label: {
+                    Label("Copy Path", systemImage: "doc.on.clipboard")
+                }
+                
+                Button {
+                    showInFinder()
+                } label: {
+                    Label("Show in Finder", systemImage: "folder")
+                }
+                
+                Button {
+                    saveToLibrary()
+                } label: {
+                    Label("Save to Library", systemImage: "square.and.arrow.down")
+                }
+            }
             
             // File info
             VStack(alignment: .leading, spacing: 2) {
@@ -2770,6 +2898,30 @@ struct RecentFileCard: View {
                 shareService: shareService
             )
         }
+        .sheet(isPresented: $showUnifiedShareSheet) {
+            UnifiedShareView(
+                fileURL: fileURL,
+                title: fileURL.deletingPathExtension().lastPathComponent,
+                initialDescription: nil,
+                isPresented: $showUnifiedShareSheet
+            )
+        }
+        .sheet(isPresented: $showEditSheet) {
+            ClipEditorView(
+                fileURL: fileURL,
+                onSave: { editedURL in
+                    showEditSheet = false
+                },
+                onCancel: {
+                    showEditSheet = false
+                }
+            )
+        }
+    }
+    
+    private var isEditableFormat: Bool {
+        let ext = fileURL.pathExtension.lowercased()
+        return ["mp4", "mov", "gif", "m4a"].contains(ext)
     }
 
     private func openFile() {

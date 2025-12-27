@@ -541,6 +541,8 @@ struct LibraryItemThumbnailView: View {
 
     @State private var isHovered = false
     @State private var thumbnail: NSImage?
+    @State private var showEditSheet = false
+    @State private var showUnifiedShareSheet = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -578,7 +580,18 @@ struct LibraryItemThumbnailView: View {
                         }
                         .buttonStyle(.plain)
 
-                        // Open/Edit
+                        // Edit (for video/gif/audio)
+                        if isEditableFormat {
+                            Button(action: { showEditSheet = true }) {
+                                Image(systemName: "scissors")
+                                    .padding(8)
+                                    .background(.ultraThinMaterial)
+                                    .clipShape(Circle())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        
+                        // Open
                         Button(action: { openItem() }) {
                             Image(systemName: "arrow.up.right.square")
                                 .padding(8)
@@ -626,6 +639,69 @@ struct LibraryItemThumbnailView: View {
         .onAppear {
             loadThumbnail()
         }
+        .contextMenu {
+            if isEditableFormat {
+                Button {
+                    showEditSheet = true
+                } label: {
+                    Label("Edit Clip...", systemImage: "scissors")
+                }
+                
+                Divider()
+            }
+            
+            Button {
+                openItem()
+            } label: {
+                Label("Open", systemImage: "arrow.up.right.square")
+            }
+            
+            Button {
+                libraryService.toggleFavorite(item)
+            } label: {
+                Label(item.isFavorite ? "Remove from Favorites" : "Add to Favorites", 
+                      systemImage: item.isFavorite ? "star.slash" : "star")
+            }
+            
+            Button {
+                showUnifiedShareSheet = true
+            } label: {
+                Label("Share to Cloud...", systemImage: "icloud.and.arrow.up")
+            }
+            
+            Divider()
+            
+            Button(role: .destructive) {
+                libraryService.deleteItem(item)
+            } label: {
+                Label("Delete", systemImage: "trash")
+            }
+        }
+        .sheet(isPresented: $showEditSheet) {
+            ClipEditorView(
+                fileURL: libraryService.fileURL(for: item),
+                onSave: { editedURL in
+                    showEditSheet = false
+                    // The edited file is saved to Downloads, library will detect it
+                },
+                onCancel: {
+                    showEditSheet = false
+                }
+            )
+        }
+        .sheet(isPresented: $showUnifiedShareSheet) {
+            UnifiedShareView(
+                fileURL: libraryService.fileURL(for: item),
+                title: item.fileName,
+                initialDescription: nil,
+                isPresented: $showUnifiedShareSheet
+            )
+        }
+    }
+    
+    private var isEditableFormat: Bool {
+        let ext = libraryService.fileURL(for: item).pathExtension.lowercased()
+        return ["mp4", "mov", "gif", "m4a"].contains(ext)
     }
 
     private var iconForType: String {
@@ -662,6 +738,8 @@ struct LibraryItemListRowView: View {
     let libraryService: LibraryService
 
     @State private var thumbnail: NSImage?
+    @State private var showEditSheet = false
+    @State private var showUnifiedShareSheet = false
 
     var body: some View {
         HStack(spacing: 12) {
@@ -717,6 +795,13 @@ struct LibraryItemListRowView: View {
                         .foregroundColor(item.isFavorite ? .yellow : .secondary)
                 }
                 .buttonStyle(.borderless)
+                
+                if isEditableFormat {
+                    Button(action: { showEditSheet = true }) {
+                        Image(systemName: "scissors")
+                    }
+                    .buttonStyle(.borderless)
+                }
 
                 Button(action: { openItem() }) {
                     Image(systemName: "arrow.up.right.square")
@@ -734,6 +819,68 @@ struct LibraryItemListRowView: View {
         .onAppear {
             loadThumbnail()
         }
+        .contextMenu {
+            if isEditableFormat {
+                Button {
+                    showEditSheet = true
+                } label: {
+                    Label("Edit Clip...", systemImage: "scissors")
+                }
+                
+                Divider()
+            }
+            
+            Button {
+                openItem()
+            } label: {
+                Label("Open", systemImage: "arrow.up.right.square")
+            }
+            
+            Button {
+                libraryService.toggleFavorite(item)
+            } label: {
+                Label(item.isFavorite ? "Remove from Favorites" : "Add to Favorites", 
+                      systemImage: item.isFavorite ? "star.slash" : "star")
+            }
+            
+            Button {
+                showUnifiedShareSheet = true
+            } label: {
+                Label("Share to Cloud...", systemImage: "icloud.and.arrow.up")
+            }
+            
+            Divider()
+            
+            Button(role: .destructive) {
+                libraryService.deleteItem(item)
+            } label: {
+                Label("Delete", systemImage: "trash")
+            }
+        }
+        .sheet(isPresented: $showEditSheet) {
+            ClipEditorView(
+                fileURL: libraryService.fileURL(for: item),
+                onSave: { editedURL in
+                    showEditSheet = false
+                },
+                onCancel: {
+                    showEditSheet = false
+                }
+            )
+        }
+        .sheet(isPresented: $showUnifiedShareSheet) {
+            UnifiedShareView(
+                fileURL: libraryService.fileURL(for: item),
+                title: item.fileName,
+                initialDescription: nil,
+                isPresented: $showUnifiedShareSheet
+            )
+        }
+    }
+    
+    private var isEditableFormat: Bool {
+        let ext = libraryService.fileURL(for: item).pathExtension.lowercased()
+        return ["mp4", "mov", "gif", "m4a"].contains(ext)
     }
 
     private var iconForType: String {

@@ -17,6 +17,7 @@ class ShareService: ObservableObject {
     @Published var shareError: Error?
     @Published var lastSharedURL: URL?
     @Published var isCloudKitAvailable = false
+    @Published var commentCounts: [String: Int] = [:]
 
     // Web viewer URL - hosted on GitHub Pages
     private let webViewerBaseURL = "https://daniellauding.github.io/instinctly-share"
@@ -347,6 +348,41 @@ class ShareService: ObservableObject {
     /// Verify password against stored hash
     func verifyPassword(_ password: String, hash: String) -> Bool {
         return hashPassword(password) == hash
+    }
+    
+    /// Fetch comment count for a shared item
+    func fetchCommentCount(for shareId: String) async throws -> Int {
+        guard isCloudKitAvailable else { return 0 }
+        
+        let predicate = NSPredicate(format: "shareId == %@", shareId)
+        let query = CKQuery(recordType: "SharedComment", predicate: predicate)
+        
+        do {
+            let (records, _) = try await publicDatabase.records(matching: query)
+            let count = records.count
+            
+            await MainActor.run {
+                commentCounts[shareId] = count
+            }
+            
+            return count
+        } catch {
+            shareLogger.error("❌ Failed to fetch comment count for \(shareId): \(error)")
+            return 0
+        }
+    }
+    
+    /// Batch fetch comment counts for multiple shared items
+    func fetchCommentCounts(for shareIds: [String]) async {
+        guard isCloudKitAvailable else { return }
+        
+        for shareId in shareIds {
+            do {
+                _ = try await fetchCommentCount(for: shareId)
+            } catch {
+                shareLogger.warning("⚠️ Failed to fetch comments for \(shareId)")
+            }
+        }
     }
 
     // MARK: - User Profile

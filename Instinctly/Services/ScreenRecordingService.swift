@@ -6,6 +6,12 @@ import Combine
 import os.log
 import UniformTypeIdentifiers
 
+// MARK: - Notification Names
+extension Notification.Name {
+    static let newRecordingAvailable = Notification.Name("newRecordingAvailable")
+    static let recordingSaved = Notification.Name("recordingSaved")
+}
+
 private let recordLogger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "Instinctly", category: "ScreenRecording")
 
 // MARK: - Recording Configuration
@@ -450,6 +456,9 @@ class ScreenRecordingService: NSObject, ObservableObject {
         
         recordLogger.info("✅ Recording ready for preview: \(outputURL.path)")
 
+        // Notify that a new recording is available
+        NotificationCenter.default.post(name: .newRecordingAvailable, object: outputURL)
+
         // Return temp URL - UI will show preview with save option
         return outputURL
     }
@@ -465,6 +474,9 @@ class ScreenRecordingService: NSObject, ObservableObject {
 
         // Also save to library for Collections view
         await saveToLibrary(url: finalURL)
+        
+        // Notify that recording was saved
+        NotificationCenter.default.post(name: .recordingSaved, object: finalURL)
 
         return finalURL
     }
@@ -634,6 +646,9 @@ class ScreenRecordingService: NSObject, ObservableObject {
 
         state = .idle
         recordLogger.info("✅ Voice recording ready for preview: \(outputURL.path)")
+        
+        // Notify that a new recording is available
+        NotificationCenter.default.post(name: .newRecordingAvailable, object: outputURL)
 
         // Return temp URL - UI will show preview with save option
         return outputURL
@@ -935,10 +950,21 @@ class ScreenRecordingService: NSObject, ObservableObject {
     }
 
     private func stopWebcamCapture() {
+        guard webcamManager != nil else {
+            recordLogger.debug("📹 Webcam already stopped")
+            return
+        }
+        
+        recordLogger.info("📹 Stopping webcam capture...")
+        
+        // Hide preview first to disconnect UI observers
+        hideWebcamPreview()
+        
+        // Stop capture session and clear reference immediately
         webcamManager?.stopCapture()
         webcamManager = nil
-        hideWebcamPreview()
-        recordLogger.info("📹 Webcam capture stopped")
+        
+        recordLogger.info("📹 Webcam capture stopped and cleaned up")
     }
 
     private func showWebcamPreview() {
@@ -1058,13 +1084,17 @@ class RecordingBorderView: NSView {
 }
 
 // MARK: - Webcam Capture Manager
-class WebcamCaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutputSampleBufferDelegate {
+class WebcamCaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureAudioDataOutputSampleBufferDelegate {
     private var captureSession: AVCaptureSession?
     private var videoOutput: AVCaptureVideoDataOutput?
+    private var audioOutput: AVCaptureAudioDataOutput?
+    private var audioInput: AVCaptureDeviceInput?
     private let sessionQueue = DispatchQueue(label: "com.instinctly.webcam.session")
 
     @Published var currentFrame: CGImage?
     @Published var isCapturing = false
+    @Published var hasMicrophoneAccess = false
+    private var lastImageBufferWarning = Date.distantPast
 
     override init() {
         super.init()
@@ -1073,7 +1103,10 @@ class WebcamCaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     
     deinit {
         recordLogger.info("📹 WebcamCaptureManager deinitializing...")
-        stopCapture()
+        // Don't call stopCapture in deinit to avoid double cleanup
+        // The session should already be stopped by explicit stopCapture call
+        isCapturing = false
+        currentFrame = nil
     }
 
     func startCapture() throws {
@@ -1107,7 +1140,27 @@ class WebcamCaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             }
             session.addInput(videoInput)
 
-            // Create output
+            // Add microphone input if available and authorized
+            if AVCaptureDevice.authorizationStatus(for: .audio) == .authorized,
+               let audioDevice = AVCaptureDevice.default(for: .audio) {
+                do {
+                    let audioInput = try AVCaptureDeviceInput(device: audioDevice)
+                    if session.canAddInput(audioInput) {
+                        session.addInput(audioInput)
+                        self.audioInput = audioInput
+                        recordLogger.info("🎤 Added microphone input: \(audioDevice.localizedName)")
+                        hasMicrophoneAccess = true
+                    }
+                } catch {
+                    recordLogger.warning("⚠️ Failed to add microphone input: \(error)")
+                    hasMicrophoneAccess = false
+                }
+            } else {
+                recordLogger.info("🎤 Microphone not authorized or not available")
+                hasMicrophoneAccess = false
+            }
+
+            // Create video output
             let output = AVCaptureVideoDataOutput()
             output.videoSettings = [
                 kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
@@ -1122,6 +1175,18 @@ class WebcamCaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             }
             session.addOutput(output)
             
+            // Create audio output if microphone is available
+            if hasMicrophoneAccess {
+                let audioOutput = AVCaptureAudioDataOutput()
+                audioOutput.setSampleBufferDelegate(self, queue: sessionQueue)
+                
+                if session.canAddOutput(audioOutput) {
+                    session.addOutput(audioOutput)
+                    self.audioOutput = audioOutput
+                    recordLogger.info("🎤 Added audio output for microphone")
+                }
+            }
+            
             // Store references only after successful setup
             self.captureSession = session
             self.videoOutput = output
@@ -1133,11 +1198,11 @@ class WebcamCaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
                 if !session.isRunning {
                     session.startRunning()
                     
-                    // Wait a moment for session to stabilize
-                    Thread.sleep(forTimeInterval: 0.5)
+                    // Wait for session to stabilize - shorter delay to prevent black screen
+                    Thread.sleep(forTimeInterval: 0.2)
                     
-                    DispatchQueue.main.async {
-                        self.isCapturing = true
+                    DispatchQueue.main.async { [weak self] in
+                        self?.isCapturing = true
                         recordLogger.info("✅ Webcam capture session started")
                     }
                 }
@@ -1149,10 +1214,24 @@ class WebcamCaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
     }
 
     func stopCapture() {
+        guard isCapturing || captureSession != nil else {
+            recordLogger.debug("📹 Webcam capture already stopped")
+            return
+        }
+        
+        recordLogger.info("📹 Stopping webcam capture session...")
+        
+        // Immediately mark as not capturing to stop delegate calls
+        isCapturing = false
+        
         sessionQueue.async { [weak self] in
             guard let self = self else { return }
             
             if let session = self.captureSession, session.isRunning {
+                // Clear delegates before stopping to prevent further callbacks
+                self.videoOutput?.setSampleBufferDelegate(nil, queue: nil)
+                self.audioOutput?.setSampleBufferDelegate(nil, queue: nil)
+                
                 session.stopRunning()
                 
                 // Remove all inputs and outputs to prevent crashes
@@ -1164,11 +1243,14 @@ class WebcamCaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
                 }
             }
             
-            DispatchQueue.main.async {
-                self.isCapturing = false
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
                 self.currentFrame = nil
                 self.captureSession = nil
                 self.videoOutput = nil
+                self.audioOutput = nil
+                self.audioInput = nil
+                self.hasMicrophoneAccess = false
                 recordLogger.info("📹 Webcam capture session stopped and cleaned up")
             }
         }
@@ -1185,8 +1267,21 @@ class WebcamCaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             return
         }
         
+        // Handle audio data
+        if output == audioOutput {
+            // Forward audio data to the recording service if it's recording with webcam
+            // This will be handled by the parent ScreenRecordingService
+            return
+        }
+        
+        // Handle video data
         guard let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
-            recordLogger.debug("📹 No image buffer in sample buffer")
+            // Reduce log noise - only warn if we haven't seen this in the last second
+            let now = Date()
+            if now.timeIntervalSince(lastImageBufferWarning) > 1.0 {
+                recordLogger.warning("📹 Camera not providing image buffers consistently")
+                lastImageBufferWarning = now
+            }
             return
         }
 
@@ -1196,7 +1291,7 @@ class WebcamCaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
             
             // Validate image dimensions
             guard ciImage.extent.width > 0 && ciImage.extent.height > 0 else {
-                recordLogger.debug("📹 Invalid image dimensions: \(ciImage.extent)")
+                recordLogger.debug("📹 Invalid image dimensions: \(ciImage.extent.width)x\(ciImage.extent.height)")
                 return
             }
             
@@ -1208,8 +1303,10 @@ class WebcamCaptureManager: NSObject, ObservableObject, AVCaptureVideoDataOutput
 
             if let cgImage = context.createCGImage(ciImage, from: ciImage.extent) {
                 DispatchQueue.main.async { [weak self] in
-                    // Only update if still capturing to avoid race conditions
-                    guard let self = self, self.isCapturing else { return }
+                    // Only update if still capturing and self exists to avoid race conditions
+                    guard let self = self, 
+                          self.isCapturing, 
+                          self.captureSession?.isRunning == true else { return }
                     self.currentFrame = cgImage
                 }
             }

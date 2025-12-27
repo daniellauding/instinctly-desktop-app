@@ -20,6 +20,7 @@ struct ClipEditorView: View {
     @State private var isTrimming = false
     @State private var trimProgress: Double = 0
     @State private var errorMessage: String?
+    @State private var includeAudio = true
 
     private let timeObserverInterval = CMTime(seconds: 0.1, preferredTimescale: 600)
 
@@ -36,9 +37,32 @@ struct ClipEditorView: View {
 
             // Video/Audio Preview
             if isVideoFile {
-                VideoPlayer(player: player)
-                    .frame(height: 200)
-                    .cornerRadius(8)
+                ZStack {
+                    Rectangle()
+                        .fill(Color.black)
+                        .frame(height: 200)
+                        .cornerRadius(8)
+                    
+                    if let player = player {
+                        VideoPlayer(player: player)
+                            .frame(height: 200)
+                            .cornerRadius(8)
+                            .onAppear {
+                                // Small delay to avoid layout conflicts
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                                    if duration > 0 {
+                                        player.play()
+                                    }
+                                }
+                            }
+                    } else {
+                        VStack {
+                            ProgressView()
+                            Text("Loading...")
+                                .foregroundColor(.white)
+                        }
+                    }
+                }
             } else {
                 // Audio waveform placeholder
                 AudioWaveformView(duration: duration, currentTime: currentTime, startTime: startTime, endTime: endTime)
@@ -116,6 +140,18 @@ struct ClipEditorView: View {
                     .foregroundColor(.red)
             }
 
+            // Audio Options
+            if hasAudio {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Audio Options")
+                        .font(.subheadline)
+                        .fontWeight(.medium)
+                    
+                    Toggle("Include Audio", isOn: $includeAudio)
+                        .toggleStyle(.checkbox)
+                }
+            }
+
             Divider()
 
             // Action Buttons
@@ -147,9 +183,14 @@ struct ClipEditorView: View {
             setupPlayer()
         }
         .onDisappear {
-            player?.pause()
-            player = nil
+            cleanupPlayer()
         }
+    }
+    
+    private func cleanupPlayer() {
+        player?.pause()
+        player?.replaceCurrentItem(with: nil)
+        player = nil
     }
 
     // MARK: - Helpers
@@ -158,24 +199,59 @@ struct ClipEditorView: View {
         let ext = fileURL.pathExtension.lowercased()
         return ["mp4", "mov", "webm", "gif"].contains(ext)
     }
+    
+    private var hasAudio: Bool {
+        let ext = fileURL.pathExtension.lowercased()
+        return ["mp4", "mov", "webm", "m4a"].contains(ext)
+    }
 
     private func setupPlayer() {
+        // Ensure file exists before creating asset
+        guard FileManager.default.fileExists(atPath: fileURL.path) else {
+            clipLogger.error("File does not exist at path: \(fileURL.path)")
+            return
+        }
+        
         let asset = AVAsset(url: fileURL)
         let playerItem = AVPlayerItem(asset: asset)
         player = AVPlayer(playerItem: playerItem)
 
-        // Get duration
+        // Get duration with retry logic
         Task {
-            do {
-                let durationValue = try await asset.load(.duration)
-                let durationSeconds = CMTimeGetSeconds(durationValue)
-                await MainActor.run {
-                    self.duration = durationSeconds
-                    self.endTime = durationSeconds
-                    clipLogger.info("Loaded clip: \(durationSeconds)s")
+            var retryCount = 0
+            let maxRetries = 3
+            
+            while retryCount < maxRetries {
+                do {
+                    // Wait a moment for file to be fully written if it's a temp file
+                    if retryCount > 0 {
+                        try await Task.sleep(nanoseconds: 500_000_000) // 0.5 seconds
+                    }
+                    
+                    let durationValue = try await asset.load(.duration)
+                    let durationSeconds = CMTimeGetSeconds(durationValue)
+                    
+                    guard durationSeconds.isFinite && durationSeconds > 0 else {
+                        throw NSError(domain: "ClipEditor", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid duration: \(durationSeconds)"])
+                    }
+                    
+                    await MainActor.run {
+                        self.duration = durationSeconds
+                        self.endTime = durationSeconds
+                        clipLogger.info("Loaded clip: \(durationSeconds)s")
+                    }
+                    return // Success, exit retry loop
+                    
+                } catch {
+                    retryCount += 1
+                    clipLogger.warning("Attempt \(retryCount) failed to load duration: \(error.localizedDescription)")
+                    
+                    if retryCount >= maxRetries {
+                        await MainActor.run {
+                            clipLogger.error("Failed to load duration after \(maxRetries) attempts: \(error.localizedDescription)")
+                        }
+                    }
                 }
-            } catch {
-                clipLogger.error("Failed to load duration: \(error.localizedDescription)")
             }
         }
 
@@ -239,7 +315,8 @@ struct ClipEditorView: View {
                 let trimmedURL = try await trimMedia(
                     inputURL: fileURL,
                     startTime: startTime,
-                    endTime: endTime
+                    endTime: endTime,
+                    includeAudio: includeAudio
                 ) { progress in
                     Task { @MainActor in
                         trimProgress = progress
@@ -259,11 +336,36 @@ struct ClipEditorView: View {
         }
     }
 
-    private func trimMedia(inputURL: URL, startTime: Double, endTime: Double, progress: @escaping (Double) -> Void) async throws -> URL {
-        let asset = AVAsset(url: inputURL)
+    private func trimMedia(inputURL: URL, startTime: Double, endTime: Double, includeAudio: Bool, progress: @escaping (Double) -> Void) async throws -> URL {
+        let sourceAsset = AVAsset(url: inputURL)
+        
+        // Create mutable composition to control tracks
+        let composition = AVMutableComposition()
+        
+        // Add video track if it exists
+        if let sourceVideoTrack = try await sourceAsset.loadTracks(withMediaType: .video).first {
+            let videoTrack = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid)
+            
+            let startCMTime = CMTime(seconds: startTime, preferredTimescale: 600)
+            let endCMTime = CMTime(seconds: endTime, preferredTimescale: 600)
+            let timeRange = CMTimeRange(start: startCMTime, end: endCMTime)
+            
+            try videoTrack?.insertTimeRange(timeRange, of: sourceVideoTrack, at: .zero)
+        }
+        
+        // Add audio track only if includeAudio is true and audio track exists
+        if includeAudio, let sourceAudioTrack = try await sourceAsset.loadTracks(withMediaType: .audio).first {
+            let audioTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
+            
+            let startCMTime = CMTime(seconds: startTime, preferredTimescale: 600)
+            let endCMTime = CMTime(seconds: endTime, preferredTimescale: 600)
+            let timeRange = CMTimeRange(start: startCMTime, end: endCMTime)
+            
+            try audioTrack?.insertTimeRange(timeRange, of: sourceAudioTrack, at: .zero)
+        }
 
-        // Create export session
-        guard let exportSession = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetHighestQuality) else {
+        // Create export session with the composition
+        guard let exportSession = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetHighestQuality) else {
             throw ClipEditorError.exportSessionCreationFailed
         }
 
@@ -277,11 +379,8 @@ struct ClipEditorView: View {
 
         exportSession.outputURL = outputURL
         exportSession.outputFileType = outputFileType(for: inputURL.pathExtension)
-
-        // Set time range
-        let startCMTime = CMTime(seconds: startTime, preferredTimescale: 600)
-        let endCMTime = CMTime(seconds: endTime, preferredTimescale: 600)
-        exportSession.timeRange = CMTimeRange(start: startCMTime, end: endCMTime)
+        
+        // Note: Time range is already handled in the composition
 
         // Monitor progress
         let progressTask = Task {
@@ -309,6 +408,9 @@ struct ClipEditorView: View {
         try FileManager.default.moveItem(at: outputURL, to: finalURL)
 
         clipLogger.info("Trimmed clip saved to: \(finalURL.path)")
+        
+        // Notify that a trimmed clip was saved
+        NotificationCenter.default.post(name: .recordingSaved, object: finalURL)
 
         // Reveal in Finder
         NSWorkspace.shared.selectFile(finalURL.path, inFileViewerRootedAtPath: "")
